@@ -56,6 +56,10 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+
+        # New: vector with all SH degrees
+        self.sh_degrees = torch.empty(0, dtype=torch.int64, device="cuda")
+
         self.setup_functions()
 
     def capture(self):
@@ -72,6 +76,8 @@ class GaussianModel:
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            # New
+            self.sh_degrees
         )
     
     def restore(self, model_args, training_args):
@@ -86,7 +92,7 @@ class GaussianModel:
         xyz_gradient_accum, 
         denom,
         opt_dict, 
-        self.spatial_lr_scale) = model_args
+        self.spatial_lr_scale, self.sh_degrees) = model_args # New: sh_degrees
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -114,6 +120,11 @@ class GaussianModel:
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
     
+    # New
+    @property
+    def get_sh_degrees(self):
+        return self.sh_degrees
+    
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -128,6 +139,10 @@ class GaussianModel:
         features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features[:, :3, 0 ] = fused_color
         features[:, 3:, 1:] = 0.0
+
+        # New
+        self.sh_degrees = torch.zeros((fused_point_cloud.shape[0],), dtype = torch.int32, device="cuda") # Initial SH degree 0, überprüfen warum long
+
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -198,11 +213,16 @@ class GaussianModel:
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
+        # New
+        sh_deg = self.sh_degrees.detach().cpu().numpy().astype(np.int32) if hasattr(self, 'sh_degrees') else np.full((xyz.shape[0],), self.max_sh_degree, dtype=np.int32)
+
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
+        # New
+        dtype_full.append(('sh_degrees', 'i4'))
 
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation), axis=1)
+        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, sh_deg), axis=1) # New: sh_deg
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
@@ -252,6 +272,18 @@ class GaussianModel:
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+
+        # New
+        try:
+            sh_deg = np.asarray(plydata.elements[0]["sh_degree"]).astype(np.int64)
+            self.sh_degrees = torch.tensor(sh_deg, dtype=torch.int32, device="cuda")
+            # set the active global degree to the maximum of the existing sh-degrees (keeps compatibility, but not necessary)
+            self.active_sh_degree = int(self.sh_degrees.max())
+        except Exception:
+            # no per-vertex sh_degree stored: enable all coefficients
+            P = xyz.shape[0]
+            self.sh_degrees = torch.full((P,), self.max_sh_degree, dtype=torch.int32, device="cuda")
+            self.active_sh_degree = self.max_sh_degree
 
         self.active_sh_degree = self.max_sh_degree
 
@@ -304,6 +336,9 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
+        # New
+        self.sh_degrees = self.sh_degrees[valid_points_mask]
+
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -346,6 +381,11 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        # New: set sh-degrees for new points (set 0 if not provided)
+        if new_sh_degrees is None:
+            new_sh_degrees = torch.zeros((new_xyz.shape[0],), dtype=torch.long, device="cuda")
+        self.sh_degrees = torch.cat((self.sh_degrees, new_sh_degrees), dim=0)
+
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -365,8 +405,10 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        # New
+        new_sh_degrees = self.sh_degrees[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_sh_degrees) # New: new_sh_degrees
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -383,8 +425,10 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
+        # New
+        new_sh_degrees = self.sh_degrees[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_sh_degrees) # New: new_sh_degrees
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -405,3 +449,34 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+    # New methods
+    def get_max_sh_degree_in_model(self):
+        return int(self.sh_degrees.max())
+    
+    def set_sh_degrees_by_indices(self, indices, degree):
+        assert degree <= self.max_sh_degree and degree >=0, f"Degree {degree} is out of bounds [0,{self.max_sh_degree}]"
+        assert indices.max() < self.sh_degrees.shape[0], f"Index {indices.max()} is out of bounds [0,{self.sh_degrees.shape[0]-1}]"
+        self.sh_degrees[indices] = degree
+
+    def get_sh_degree_distribution(self):
+        unique, counts = torch.unique(self.sh_degrees, return_counts=True)
+        for u, c in zip(unique.cpu().numpy(), counts.cpu().numpy()):
+            print(f"SH degree {u}: {c} Gaussians")
+
+    def get_sh_degrees_by_indices(self, indices):
+        return self.sh_degrees[indices]
+    
+    def randomly_increase_sh_degrees_by_one(self, fraction):
+        n_points = self.sh_degrees.shape[0]
+        n_increase = int(n_points * fraction)
+        all_indices = torch.arange(n_points, device="cuda")
+        selected_indices = all_indices[torch.randperm(n_points)[:n_increase]]
+        count = 0
+        for idx in selected_indices:
+            if self.sh_degrees[idx] < self.max_sh_degree:
+                self.sh_degrees[idx] += 1
+                count += 1
+        updated_percentage = count / n_increase * 100.0
+        print(f"Randomly increased SH degree for {count} Gaussians ({updated_percentage:.2f}%), given was {fraction*100:.2f}%")
+        

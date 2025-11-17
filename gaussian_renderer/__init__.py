@@ -74,6 +74,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
             dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+
+            # New 
+            max_num_coeffs = (pc.max_sh_degree + 1) **2
+            num_coeffs = ((pc.sh_degrees +1)**2).view(-1,1)
+            idxs = torch.arange(0, max_num_coeffs, device="cuda").view(1, -1)
+            mask = (idxs < num_coeffs).float().view(-1, 1, max_num_coeffs)
+            assert shs_view.shape == mask.shape, f"Wrong shape of mask: shs_view shape: {shs_view.shape}, mask shape: {mask.shape}"
+            shs_view = shs_view * mask
+            # end new
+
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
