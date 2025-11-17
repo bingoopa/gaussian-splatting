@@ -16,14 +16,29 @@ from PIL import Image
 
 MAX_NUM_IMAGES_PER_SCENE = 2048
 
+def first_existing(dirs):
+    """Return the first existing directory from a list, or None."""
+    for d in dirs:
+        if os.path.isdir(d):
+            return d
+    return None
+
 
 def readScannetppInfo(rootdir):
     train_cam_infos = []
     test_cam_infos = []
     transforms_path = os.path.join(rootdir, "nerfstudio/transforms_undistorted.json")
-    images_dir = os.path.join(rootdir, "resized_images_undistorted")
-    points_txt_path = os.path.join(rootdir, "colmap/model_transformed_scaled/points3D.txt")
-    camera_extrinsic_path = os.path.join(rootdir, "colmap/model_transformed_scaled/images.txt")
+    images_dir = first_existing([
+        os.path.join(rootdir, "resized_images_undistorted"),
+        os.path.join(rootdir, "resized_undistorted_images")
+    ])
+    
+    if os.path.isdir(os.path.join(rootdir, "colmap/model_transformed_scaled")):
+        points_txt_path = os.path.join(rootdir, "colmap/model_transformed_scaled/points3D.txt")
+        camera_extrinsic_path = os.path.join(rootdir, "colmap/model_transformed_scaled/images.txt")
+    else:
+        points_txt_path = os.path.join(rootdir, "colmap/points3D.txt")
+        camera_extrinsic_path = os.path.join(rootdir, "colmap/images.txt")
     camera_extrinsic = read_extrinsics_text(camera_extrinsic_path)
 
     extrinsic_dict = {}
