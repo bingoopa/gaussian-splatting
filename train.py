@@ -307,7 +307,8 @@ if __name__ == "__main__":
     parser.add_argument("--use_gui", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--sh_percentage", nargs="+", type=int, default=[0, 0])
+    # New argument for SH percentage increase
+    parser.add_argument("--sh_percentage", nargs="+", type=int, default=[0, 0]) # first: percentage, second: interval -> increases sh-degree‚ every interval iterations
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
