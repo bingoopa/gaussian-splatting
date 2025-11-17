@@ -60,6 +60,7 @@ class GaussianModel:
         # New: vector with all SH degrees
         self.sh_degrees = torch.empty(0, dtype=torch.int64, device="cuda")
 
+
         self.setup_functions()
 
     def capture(self):
@@ -92,7 +93,8 @@ class GaussianModel:
         xyz_gradient_accum, 
         denom,
         opt_dict, 
-        self.spatial_lr_scale, self.sh_degrees) = model_args # New: sh_degrees
+        self.spatial_lr_scale, 
+        self.sh_degrees) = model_args # New: sh_degrees
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -141,8 +143,8 @@ class GaussianModel:
         features[:, 3:, 1:] = 0.0
 
         # New
-        self.sh_degrees = torch.zeros((fused_point_cloud.shape[0],), dtype = torch.int32, device="cuda") # Initial SH degree 0, überprüfen warum long
-
+        self.sh_degrees = torch.zeros((fused_point_cloud.shape[0],), dtype = torch.int64, device="cuda") # Initial SH degree 0, überprüfen warum long
+        #BENNET: torch.int32 zu torch.int64 geändert, hast du auch schon betrachtet, oder? 
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -214,8 +216,12 @@ class GaussianModel:
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
         # New
-        sh_deg = self.sh_degrees.detach().cpu().numpy().astype(np.int32) if hasattr(self, 'sh_degrees') else np.full((xyz.shape[0],), self.max_sh_degree, dtype=np.int32)
-
+        #sh_deg = self.sh_degrees.detach().cpu().numpy().astype(np.int32) if hasattr(self, 'sh_degrees') else np.full((xyz.shape[0],), self.max_sh_degree, dtype=np.int32)
+        #BENNET: Hier änderungen vorgenommen (Copilot: Convert to i4 for PLY, keep internal dtype int64)
+        sh_deg = (self.sh_degrees.detach().cpu().numpy().astype(np.int32)
+                  if hasattr(self, 'sh_degrees') and self.sh_degrees.numel() == xyz.shape[0]
+                  else np.full((xyz.shape[0],), self.max_sh_degree, dtype=np.int32))
+        sh_deg = sh_deg.reshape(-1, 1)
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
         # New
@@ -275,17 +281,17 @@ class GaussianModel:
 
         # New
         try:
-            sh_deg = np.asarray(plydata.elements[0]["sh_degree"]).astype(np.int64)
-            self.sh_degrees = torch.tensor(sh_deg, dtype=torch.int32, device="cuda")
+            sh_deg = np.asarray(plydata.elements[0]["sh_degrees"]).astype(np.int64)
+            self.sh_degrees = torch.tensor(sh_deg, dtype=torch.int64, device="cuda")
             # set the active global degree to the maximum of the existing sh-degrees (keeps compatibility, but not necessary)
             self.active_sh_degree = int(self.sh_degrees.max())
         except Exception:
             # no per-vertex sh_degree stored: enable all coefficients
             P = xyz.shape[0]
-            self.sh_degrees = torch.full((P,), self.max_sh_degree, dtype=torch.int32, device="cuda")
+            self.sh_degrees = torch.full((P,), self.max_sh_degree, dtype=torch.int64, device="cuda")
             self.active_sh_degree = self.max_sh_degree
 
-        self.active_sh_degree = self.max_sh_degree
+        #self.active_sh_degree = self.max_sh_degree
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -361,7 +367,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_sh_degrees=None): #BENNET: New argument: new_sh_degrees=None
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -382,9 +388,17 @@ class GaussianModel:
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
         # New: set sh-degrees for new points (set 0 if not provided)
+        #if new_sh_degrees is None:
+        #    new_sh_degrees = torch.zeros((new_xyz.shape[0],), dtype=torch.int32, device="cuda")
+        #self.sh_degrees = torch.cat((self.sh_degrees, new_sh_degrees), dim=0)
+        #BENNET: geändert, um dtype und device zu gewährleisten
         if new_sh_degrees is None:
-            new_sh_degrees = torch.zeros((new_xyz.shape[0],), dtype=torch.long, device="cuda")
+            new_sh_degrees = torch.zeros((new_xyz.shape[0],), dtype=self.sh_degrees.dtype, device=self.sh_degrees.device)
+        else:
+            # ensure same dtype and device
+            new_sh_degrees = new_sh_degrees.to(dtype=self.sh_degrees.dtype, device=self.sh_degrees.device)
         self.sh_degrees = torch.cat((self.sh_degrees, new_sh_degrees), dim=0)
+
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]

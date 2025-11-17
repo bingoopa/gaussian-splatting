@@ -31,6 +31,19 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+#BENNET: Für log dateei, auskommentieren, wenn du nicht brauchst
+class Tee(object):
+    def __init__(self, file, stream):
+        self.file = file
+        self.stream = stream
+    def write(self, data):
+        self.stream.write(data)
+        self.file.write(data)
+        self.file.flush()
+    def flush(self):
+        self.stream.flush()
+        self.file.flush()
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui=False, sh_percentage=[0, 0]):
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
@@ -111,7 +124,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 P = gaussians.get_features.shape[0]
                 num_coeffs = (gaussians.max_sh_degree + 1) ** 2
                 device = gaussians.get_features.device
-                keep_counts = ((gaussians.sh_degree_per_point + 1) ** 2).view(P, 1).to(device)
+                keep_counts = ((gaussians.sh_degrees + 1) ** 2).view(P, 1).to(device) #hier sh_degree_per_point in sh_degrees geändert
                 idxs = torch.arange(num_coeffs, device=device).view(1, num_coeffs)
                 mask = (idxs < keep_counts).float()
 
@@ -178,6 +191,17 @@ def prepare_output_and_logger(args):
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
     os.makedirs(args.model_path, exist_ok = True)
+
+    # ------------------------------
+    # BENNET: Logger aktivieren
+    # ------------------------------
+    log_path = os.path.join(args.model_path, "log.txt")
+    log_file = open(log_path, "a")
+    sys.stdout = Tee(log_file, sys.__stdout__)
+    sys.stderr = Tee(log_file, sys.__stderr__)
+    print("Logging to:", log_path)
+    #Ende neuer Code
+    
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
