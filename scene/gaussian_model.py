@@ -486,11 +486,9 @@ class GaussianModel:
         n_increase = int(n_points * fraction)
         all_indices = torch.arange(n_points, device="cuda")
         selected_indices = all_indices[torch.randperm(n_points)[:n_increase]]
-        count = 0
-        for idx in selected_indices:
-            if self.sh_degrees[idx] < self.max_sh_degree:
-                self.sh_degrees[idx] += 1
-                count += 1
-        updated_percentage = count / n_increase * 100.0
-        print(f"Randomly increased SH degree for {count} Gaussians ({updated_percentage:.2f}%), given was {fraction*100:.2f}%")
+        valid = selected_indices[self.sh_degrees[selected_indices] < self.max_sh_degree]
+        self.sh_degrees[valid] += 1
+
+        updated_percentage = valid.numel() / n_increase * 100.0
+        print(f"Randomly increased SH degree for {valid.numel()} Gaussians ({updated_percentage:.2f}%), given was {fraction*100:.2f}%")
         

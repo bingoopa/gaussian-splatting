@@ -115,6 +115,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss /= opt.optimizer_step_interval     # Gradient accumulation
             loss.backward()
 
+            if iteration % 1000 == 0 and iteration > 1000:
+                print("shape of features_dc_gradient:", gaussians._features_dc.grad.shape)
+
         iter_end.record()
 
         with torch.no_grad():
