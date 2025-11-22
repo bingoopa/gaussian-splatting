@@ -20,6 +20,10 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+if(pandas_installed:= 'pandas' in globals() or 'pandas' in locals()):
+    import pandas as pd
+else:
+    print("Pandas not installed, getColorGradStats will not work.")
 
 class GaussianModel:
 
@@ -56,8 +60,13 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        # New
+        self.accum_color_grads_dc = torch.empty(0)
+        self.accum_color_grads_rest = torch.empty(0)
+        self.color_denom = 0
+        self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees']) if pandas_installed else None
 
-        # New: vector with all SH degrees
+        # New
         self.sh_degrees = torch.empty(0, dtype=torch.int64, device="cuda")
 
 
@@ -78,6 +87,10 @@ class GaussianModel:
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
             # New
+            self.accum_color_grads_dc,
+            self.accum_color_grads_rest,
+            self.color_denom,
+            self.df
             self.sh_degrees
         )
     
@@ -94,7 +107,11 @@ class GaussianModel:
         denom,
         opt_dict, 
         self.spatial_lr_scale, 
-        self.sh_degrees) = model_args # New: sh_degrees
+        self.accum_color_grads_dc,
+        self.accum_color_grads_rest,
+        self.color_denom,
+        self.df,
+        self.sh_degrees) = model_args # New: sh_degrees and color grad stats
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -464,7 +481,24 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
 
-    # New methods
+    # New
+    def cumulate_color_gradients(self): 
+        max_num_coeffs = (self.max_sh_degree + 1) **2 - 1
+        num_coeffs = ((self.sh_degrees +1)**2 - 1).view(-1,1)
+        idxs = torch.arange(0, max_num_coeffs, device="cuda").view(1, -1)
+        mask = (idxs < num_coeffs).float().view(-1, 1, max_num_coeffs)
+        assert self._features_rest.shape == mask.shape, f"Wrong shape of mask: feature_rest gradient shape: {self._features_rest.shape}, mask shape: {mask.shape}"
+        self.accum_color_grads_dc += torch.norm(self._features_dc.grad, dim = -1)
+        self.accum_color_grads_rest += torch.norm(self._features_rest.grad * mask, dim = -1)
+        self.color_denom += 1 
+
+    # New
+    def color_gradients_postfix(self):
+        self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0], 1), device = "cuda")
+        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+    # New methods for SH degree management
     def get_max_sh_degree_in_model(self):
         return int(self.sh_degrees.max())
     
@@ -472,6 +506,11 @@ class GaussianModel:
         assert degree <= self.max_sh_degree and degree >=0, f"Degree {degree} is out of bounds [0,{self.max_sh_degree}]"
         assert indices.max() < self.sh_degrees.shape[0], f"Index {indices.max()} is out of bounds [0,{self.sh_degrees.shape[0]-1}]"
         self.sh_degrees[indices] = degree
+
+    def set_random_sh_degrees(self):
+        n_points = self.sh_degrees.shape[0]
+        random_degrees = torch.randint(0, self.max_sh_degree + 1, (n_points,), device="cuda", dtype=torch.int64)
+        self.sh_degrees = random_degrees
 
     def get_sh_degree_distribution(self):
         unique, counts = torch.unique(self.sh_degrees, return_counts=True)
@@ -493,4 +532,48 @@ class GaussianModel:
                 count += 1
         updated_percentage = count / n_increase * 100.0
         print(f"Randomly increased SH degree for {count} Gaussians ({updated_percentage:.2f}%), given was {fraction*100:.2f}%")
+
+    
+    # New
+    def getColorGradStats(self, iteration):
+
+        # Ensure that cumulate_color_gradients is the average over 50 iterations
+        assert self.color_denom == 50, f"color_denom is {self.color_denom}, expected 50"
+
+        # Compute ratios and average gradients and store in dataframe
+        ratios = (self.accum_color_grads_rest / (self.accum_color_grads_dc + 1e-15)).detach().cpu().numpy()
+        color_grads_dc = (self.accum_color_grads_dc / (self.color_denom + 1e-15)).detach().cpu().numpy()
+        color_grads_rest = (self.accum_color_grads_rest / (self.color_denom + 1e-15)).detach().cpu().numpy()
+        sh_degrees_array = self.sh_degrees.detach().cpu().numpy()
+
+        if self.df is not None:
+            P = len(color_grads_dc)
+            assert len(color_grads_rest) == P and len(ratios) == P, "Inconsistent lengths of gradient arrays"
+            
+            new_df = pd.DataFrame({
+                'iteration': np.full(P, iteration, dtype=int),
+                'grads_dc': color_grads_dc,
+                'grads_rest': color_grads_rest,
+                'grads_ratio': ratios,
+                'sh_degrees': sh_degrees_array
+            })
+
+            # an bestehenden df anhängen
+            self.df = pd.concat([self.df, new_df], ignore_index=True)
+    
+    # New
+    def saveColorGradStatsToCSV(self, path):
+        if self.df is not None:
+            mkdir_p(os.path.dirname(path))
+            self.df.to_csv(path, index=False)
+            print(f"Saved color gradient statistics to {path}")
+        else:
+            print("Pandas not installed, cannot save color gradient statistics.")
+
+    def prepare_color_grads(self):
+        ratios = (self.accum_color_grads_rest / (self.accum_color_grads_dc + 1e-15))
+        color_grads_dc = (self.accum_color_grads_dc / (self.color_denom + 1e-15))
+        color_grads_rest = (self.accum_color_grads_rest / (self.color_denom + 1e-15))
+        return color_grads_dc, color_grads_rest, ratios
         
+            

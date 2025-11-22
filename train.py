@@ -44,7 +44,7 @@ class Tee(object):
         self.stream.flush()
         self.file.flush()
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui=False, sh_percentage=[0, 0]):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui=False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False):
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
@@ -56,6 +56,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    # New: initialize sh_degrees randomly if needed
+    if need_color_grads or color_grad_stats:
+        gaussians.initialize_sh_degrees_randomly()
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -115,6 +119,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss /= opt.optimizer_step_interval     # Gradient accumulation
             loss.backward()
 
+
         iter_end.record()
 
         with torch.no_grad():
@@ -150,6 +155,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
+            # New: compute color gradient stats
+            if color_grad_stats or need_color_grads:
+                color_grad_interval = 5000 # only works properly if color_grad_interval >= densify_from_iter + 50 (normally densify_from_iter=500)
+                # We average of the last 50 iters before densification -> we want to avoid effects of densification on the stats
+                if iteration % color_grad_interval >= opt.densify_from_iter - 50 and iteration % color_grad_interval < opt.densify_from_iter:
+                    gaussians.cumulate_color_gradients()
+                if color_grad_stats and (iteration % color_grad_interval == opt.densify_from_iter):
+                    # Compute color gradient stats, in the current configuration at iterations 500, 5500, 10500, ...
+                    gaussians.getColorGradStats(iteration)
+            
+            # Für die Visualisierung der color_gradients sollte es so aussehen: Die Position im Training ist so gewählt, dass es vor der Densification passiert
+            # if need_color_grads and (iteration % color_grad_interval == opt.densify_from_iter):
+            #     color_grads_dc, color_grads_rest, color_grads_ratio = gaussians.prepare_color_gradients() -> gibt die color gradients von
+            #     features_dc und features_rest sowie das Verhältnis zurück
+                
+            
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
@@ -162,6 +183,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
+            
+            # New: reset color_gradient accumulator
+            if (color_grad_stats or need_color_grads) and iteration % color_grad_interval == opt.densify_from_iter:
+                gaussians.color_gradients_postfix()
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -177,6 +202,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % sh_percentage[1] == 0:
                     gaussians.randomly_increase_sh_degrees_by_one(sh_percentage[0]/100.0)
                     gaussians.get_sh_degree_distribution()
+
+    # New: save color gradient stats to CSV
+    if color_grad_stats:
+        gaussians.saveColorGradStatsToCSV(os.path.join(dataset.model_path, "color_gradient_stats.csv"))
     eval_and_save(dataset.model_path, scene, render, (pipe, background))
 
 
@@ -310,6 +339,7 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
     print("PSNR: {}".format(np.mean(all_psnr)))
     print("SSIM: {}".format(np.mean(all_ssim)))
     print("LPIPS: {}".format(np.mean(all_lpips)))
+    
 
 
 
@@ -333,6 +363,8 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     # New argument for SH percentage increase
     parser.add_argument("--sh_percentage", nargs="+", type=int, default=[0, 0]) # first: percentage, second: interval -> increases sh-degree‚ every interval iterations
+    parser.add_argument("--color_grad_stats", type = bool, default=False, help="Whether to collect color gradient statistics during training")
+    parser.add_argument("--need_color_grads", type = bool, default=False, help="Whether to track color gradients during training")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -346,7 +378,7 @@ if __name__ == "__main__":
         print(f"Starting GUI server on {args.ip}:{args.port}")
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads)
 
     # All done
     print("\nTraining complete.")
