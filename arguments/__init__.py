@@ -86,9 +86,9 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002
-        self.prune_alpha_threshold = 0.005
+        # Scannet: self.prune_alpha_threshold = 0.005
         self.random_background = False
-        self.optimizer_step_interval = 1
+        # Scannet: self.optimizer_step_interval = 1
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

@@ -90,7 +90,7 @@ class GaussianModel:
             self.accum_color_grads_dc,
             self.accum_color_grads_rest,
             self.color_denom,
-            self.df
+            self.df,
             self.sh_degrees
         )
     
