@@ -20,10 +20,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-if(pandas_installed:= 'pandas' in globals() or 'pandas' in locals()):
-    import pandas as pd
-else:
-    print("Pandas not installed, getColorGradStats will not work.")
+import pandas as pd
 
 class GaussianModel:
 
@@ -64,7 +61,16 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
-        self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees']) if pandas_installed else None
+        try:
+            import pandas as pd
+            print("Pandas successfully imported for getColorGradStats.")
+            #pandas_installed = True
+            self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees'])
+        except ImportError:
+            print("Pandas not installed, getColorGradStats will not work.")
+            #pandas_installed = False TODO: remove, if color_grads are no more necessary
+            self.df = None
+        
 
         # New
         self.sh_degrees = torch.empty(0, dtype=torch.int64, device="cuda")

@@ -205,6 +205,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     # New: save color gradient stats to CSV
     if color_grad_stats:
+        print("Gleich werdn die color gradient stats gespeichert")
         gaussians.saveColorGradStatsToCSV(os.path.join(dataset.model_path, "color_gradient_stats.csv"))
     eval_and_save(dataset.model_path, scene, render, (pipe, background))
 
