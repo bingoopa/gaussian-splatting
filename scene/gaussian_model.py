@@ -20,10 +20,7 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-#if(pandas_installed:= 'pandas' in globals() or 'pandas' in locals()):
-#    import pandas as pd
-#else:
-#    print("Pandas not installed, getColorGradStats will not work.")
+import pandas as pd
 
 class GaussianModel:
 
@@ -64,7 +61,16 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
-        #self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees']) if pandas_installed else None
+        try:
+            import pandas as pd
+            print("Pandas successfully imported for getColorGradStats.")
+            #pandas_installed = True
+            self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees'])
+        except ImportError:
+            print("Pandas not installed, getColorGradStats will not work.")
+            #pandas_installed = False TODO: remove, if color_grads are no more necessary
+            self.df = None
+        
 
         # New
         self.sh_degrees = torch.empty(0, dtype=torch.int64, device="cuda")
@@ -483,20 +489,30 @@ class GaussianModel:
 
     # New
     def cumulate_color_gradients(self): 
+        if(self.color_denom == 0):
+            print("Initializing color gradient accumulation tensors...")
+            self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0],), device="cuda")
+            self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0],), device = "cuda")
         max_num_coeffs = (self.max_sh_degree + 1) **2 - 1
-        num_coeffs = ((self.sh_degrees +1)**2 - 1).view(-1,1)
+        num_coeffs = ((self.sh_degrees +1)**2 - 1).view(-1, 1)
         idxs = torch.arange(0, max_num_coeffs, device="cuda").view(1, -1)
-        mask = (idxs < num_coeffs).float().view(-1, 1, max_num_coeffs)
-        assert self._features_rest.shape == mask.shape, f"Wrong shape of mask: feature_rest gradient shape: {self._features_rest.shape}, mask shape: {mask.shape}"
-        self.accum_color_grads_dc += torch.norm(self._features_dc.grad, dim = -1)
-        self.accum_color_grads_rest += torch.norm(self._features_rest.grad * mask, dim = -1)
+        mask = (idxs < num_coeffs).float().view(-1, max_num_coeffs)
+        #assert self._features_rest.shape == mask.shape, f"Wrong shape of mask: feature_rest gradient shape: {self._features_rest.shape}, mask shape: {mask.shape}"
+    #print("shape of self._features_rest.grad:", self._features_rest.grad.shape)
+    #print("shape of self._features_dc.grad:", self._features_dc.grad.shape)
+    #print("shape of accum_color_grads_dc:", self.accum_color_grads_dc.shape)
+    #print("shape of accum_color_grads_rest:", self.accum_color_grads_rest.shape)
+    #print("shape of mask:", mask.shape)
+        self.accum_color_grads_dc += torch.norm(self._features_dc.grad, dim = -1).squeeze(-1)
+        self.accum_color_grads_rest += torch.norm(self._features_rest.grad * mask.unsqueeze(-1), dim = (1, 2))
+        #print("shape of self.accum_color_grads_rest after update:", self.accum_color_grads_rest.shape)
         self.color_denom += 1 
 
     # New
     def color_gradients_postfix(self):
         self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0], 1), device = "cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.color_denom = 0
 
     # New methods for SH degree management
     def get_max_sh_degree_in_model(self):

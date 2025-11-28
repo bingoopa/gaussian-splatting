@@ -31,7 +31,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-#BENNET: Für log dateei, auskommentieren, wenn du nicht brauchst
+    #BENNET: Für log dateei, auskommentieren, wenn du nicht brauchst
 class Tee(object):
     def __init__(self, file, stream):
         self.file = file
@@ -59,7 +59,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     # New: initialize sh_degrees randomly if needed
     if need_color_grads or color_grad_stats:
-        gaussians.initialize_sh_degrees_randomly()
+        gaussians.set_random_sh_degrees()
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -206,8 +206,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.get_sh_degree_distribution()
 
     # New: save color gradient stats to CSV
-    #if color_grad_stats:
-    #   gaussians.saveColorGradStatsToCSV(os.path.join(dataset.model_path, "color_gradient_stats.csv"))
+    if color_grad_stats:
+        print("Gleich werdn die color gradient stats gespeichert")
+        gaussians.saveColorGradStatsToCSV(os.path.join(dataset.model_path, "color_gradient_stats.csv"))
     eval_and_save(dataset.model_path, scene, render, (pipe, background))
 
 
