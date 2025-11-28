@@ -31,12 +31,9 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 # Für die Farbkodierung der Farbgradienten
-if need_color_grads: # später SH-update einbauen und matplotlib nicht mehr importieren, weil nur für Visualisierung
-    import matplotlib.cm as cm
-    import matplotlib.colors as colors
-    "Matplotlib importiert für color gradient visualization"
-else:
-    print("Matplotlib nicht importiert, weil need_color_grads False")
+# später SH-update einbauen und matplotlib nicht mehr importieren, weil nur für Visualisierung
+import matplotlib.cm as cm
+import matplotlib.colors as colors
 
     #BENNET: Für log dateei, auskommentieren, wenn du nicht brauchst
 class Tee(object):
