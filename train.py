@@ -44,7 +44,7 @@ class Tee(object):
         self.stream.flush()
         self.file.flush()
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False):
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
@@ -116,7 +116,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         loss = Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        loss /= opt.optimizer_step_interval     # Gradient accumulation
+        #loss /= opt.optimizer_step_interval     # Gradient accumulation
         loss.backward()
 
 
@@ -165,11 +165,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # Compute color gradient stats, in the current configuration at iterations 500, 5500, 10500, ...
                     gaussians.getColorGradStats(iteration)
             
-            # Für die Visualisierung der color_gradients sollte es so aussehen: Die Position im Training ist so gewählt, dass es vor der Densification passiert
-            # if need_color_grads and (iteration % color_grad_interval == opt.densify_from_iter):
-            #     color_grads_dc, color_grads_rest, color_grads_ratio = gaussians.prepare_color_gradients() -> gibt die color gradients von
-            #     features_dc und features_rest sowie das Verhältnis zurück
-                
+            #Für die Visualisierung der color_gradients sollte es so aussehen: Die Position im Training ist so gewählt, dass es vor der Densification passiert
+            #if need_color_grads and (iteration % color_grad_interval == opt.densify_from_iter):
+                #color_grads_dc, color_grads_rest, color_grads_ratio = gaussians.prepare_color_gradients()# -> gibt die color gradients von features_dc und features_rest sowie das Verhältnis zurück
+                #werte für RGB values berechnen aus color_grad_dc und color_grad_rest magnitude
+                #gaussians.visualize_color_gradients(color_grads_dc, color_grads_rest, color_grads_ratio, cgrad_out_dir, iteration)
+
+            
             
             # Densification
             if iteration < opt.densify_until_iter:
@@ -204,8 +206,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.get_sh_degree_distribution()
 
     # New: save color gradient stats to CSV
-    if color_grad_stats:
-        gaussians.saveColorGradStatsToCSV(os.path.join(dataset.model_path, "color_gradient_stats.csv"))
+    #if color_grad_stats:
+    #   gaussians.saveColorGradStatsToCSV(os.path.join(dataset.model_path, "color_gradient_stats.csv"))
     eval_and_save(dataset.model_path, scene, render, (pipe, background))
 
 
@@ -315,9 +317,15 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
     combine_out_dir = os.path.join(model_path, "combine")
     os.makedirs(render_out_dir, exist_ok=True)
     os.makedirs(combine_out_dir, exist_ok=True)
+    if args.visualize_gradients:  # BENNET: Ordner für color gradients visualisierung 
+        cgrad_out_dir = os.path.join(model_path, "color_gradients") 
+        os.makedirs(cgrad_out_dir, exist_ok=True) 
+    if args.visualize_degrees: # BENNET: Ordner für color gradients visualisierung
+        shdeg_out_dir = os.path.join(model_path, "sh_degrees")
+        os.makedirs(shdeg_out_dir, exist_ok=True) 
 
-    for idx, viewpoint in enumerate(cameras):
-        image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+    for idx, viewpoint in enumerate(cameras):        
+        image = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0) 
         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
         save_path = os.path.join(render_out_dir, viewpoint.image_name + ".png")
         image_np = (image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
@@ -335,6 +343,15 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
         all_psnr.append(psnr_val.item())
         all_ssim.append(ssim_val.item())
         all_lpips.append(lpips_val.item())
+
+    if args.visualize_degrees: # BENNET: Sh-Degrees rendern
+        for idx, viewpoint in enumerate(cameras):  
+            scene.gaussians.visualize_sh_degrees()
+            image_shdeg = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+            image_shdeg_np = (image_shdeg * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
+            save_path = os.path.join(shdeg_out_dir, viewpoint.image_name + ".png")
+            Image.fromarray(np.concatenate((image_shdeg_np, gt_image_np), axis=1)).save(save_path)
+
     print("Evaluation results:")
     print("PSNR: {}".format(np.mean(all_psnr)))
     print("SSIM: {}".format(np.mean(all_ssim)))
@@ -365,6 +382,8 @@ if __name__ == "__main__":
     parser.add_argument("--sh_percentage", nargs="+", type=int, default=[0, 0]) # first: percentage, second: interval -> increases sh-degree‚ every interval iterations
     parser.add_argument("--color_grad_stats", type = bool, default=False, help="Whether to collect color gradient statistics during training")
     parser.add_argument("--need_color_grads", type = bool, default=False, help="Whether to track color gradients during training")
+    # New argument um SH degrees zu visualisueren
+    parser.add_argument("--visualize_degrees", action="store_true", help="Visualize Gaussians by SH-degree at the end of training")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -378,7 +397,7 @@ if __name__ == "__main__":
         print(f"Starting GUI server on {args.ip}:{args.port}")
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees)
 
     # All done
     print("\nTraining complete.")
