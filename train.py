@@ -51,7 +51,7 @@ class Tee(object):
         self.stream.flush()
         self.file.flush()
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False, adaptive_sh = False):
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
@@ -67,6 +67,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # New: initialize sh_degrees randomly if needed
     if need_color_grads or color_grad_stats:
         gaussians.set_random_sh_degrees()
+
+    # Compute color gradients if needed (explicitly requested or for adaptive SH)
+    need_color_grads = need_color_grads or adaptive_sh
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -162,7 +165,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            # New: compute color gradient stats
+            # New: compute color gradient stats/ adapt SH degrees
             if color_grad_stats or need_color_grads:
                 color_grad_interval = 1000 # only works properly if color_grad_interval >= densify_from_iter + 1 (normally densify_from_iter=500)
                 # We average of the last 50 iters before densification -> we want to avoid effects of densification on the stats
@@ -171,6 +174,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if color_grad_stats and (iteration % color_grad_interval == opt.densify_from_iter):
                     # Compute color gradient stats, in the current configuration at iterations 500, 5500, 10500, ...
                     gaussians.getColorGradStats(iteration)
+                if adaptive_sh and (iteration % color_grad_interval == opt.densify_from_iter):
+                    # Update SH degrees based on accumulated color gradients
+                    gaussians.adapt_sh_degrees_based_on_color_grads()
+                    gaussians.get_sh_degree_distribution()
+                
             
             #Für die Visualisierung der color_gradients sollte es so aussehen: Die Position im Training ist so gewählt, dass es vor der Densification passiert
             #if need_color_grads and (iteration % color_grad_interval == opt.densify_from_iter):
@@ -412,6 +420,8 @@ if __name__ == "__main__":
     parser.add_argument("--need_color_grads", type = bool, default=False, help="Whether to track color gradients during training")
     # New argument um SH degrees zu visualisueren
     parser.add_argument("--visualize_degrees", action="store_true", help="Visualize Gaussians by SH-degree at the end of training")
+    # New argument um adaptive sh-degrees zu aktivieren basierend auf color gradients
+    parser.add_argument("--adaptive_sh", action="store_true", default=False, help="Use adaptive SH degrees based on color gradients")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -425,7 +435,7 @@ if __name__ == "__main__":
         print(f"Starting GUI server on {args.ip}:{args.port}")
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees, args.adaptive_sh)
 
     # All done
     print("\nTraining complete.")

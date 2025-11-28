@@ -624,3 +624,11 @@ class GaussianModel:
 
                 if self._features_rest is not None and self._features_rest.numel() > 0:
                     self._features_rest.data[mask, :, :] = 0.0
+    
+    def increase_sh_degree_based_on_color_grads(self, ratio=0.05):
+        quantile_value = torch.quantile(self.accum_color_grads_dc, 1-ratio)
+        to_increase = (self.accum_color_grads_dc > quantile_value).squeeze()
+        valid = to_increase & (self.sh_degrees < self.max_sh_degree)
+        self.sh_degrees[valid] += 1
+        updated_percentage = valid.sum().item() / to_increase.sum().item() * 100.0 if to_increase.sum().item() > 0 else 0.0
+        print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio_threshold}")
