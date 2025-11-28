@@ -20,7 +20,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-import pandas as pd
+#if color_grad_stats: Das ist nicht definiert, aber wahrscheinlich eh nicht mehr notwendig
+    #import pandas as pd
 
 class GaussianModel:
 
@@ -149,6 +150,10 @@ class GaussianModel:
     @property
     def get_sh_degrees(self):
         return self.sh_degrees
+    
+    @property
+    def get_accumulated_color_grads_dc(self):
+        return self.accum_color_grads_dc
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
@@ -589,5 +594,7 @@ class GaussianModel:
         color_grads_dc = (self.accum_color_grads_dc / (self.color_denom + 1e-15))
         color_grads_rest = (self.accum_color_grads_rest / (self.color_denom + 1e-15))
         return color_grads_dc, color_grads_rest, ratios
+    
+    
         
             

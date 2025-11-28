@@ -30,6 +30,13 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+# Für die Farbkodierung der Farbgradienten
+if need_color_grads: # später SH-update einbauen und matplotlib nicht mehr importieren, weil nur für Visualisierung
+    import matplotlib.cm as cm
+    import matplotlib.colors as colors
+    "Matplotlib importiert für color gradient visualization"
+else:
+    print("Matplotlib nicht importiert, weil need_color_grads False")
 
     #BENNET: Für log dateei, auskommentieren, wenn du nicht brauchst
 class Tee(object):
@@ -157,7 +164,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # New: compute color gradient stats
             if color_grad_stats or need_color_grads:
-                color_grad_interval = 5000 # only works properly if color_grad_interval >= densify_from_iter + 50 (normally densify_from_iter=500)
+                color_grad_interval = 1000 # only works properly if color_grad_interval >= densify_from_iter + 1 (normally densify_from_iter=500)
                 # We average of the last 50 iters before densification -> we want to avoid effects of densification on the stats
                 if iteration % color_grad_interval >= opt.densify_from_iter - 50 and iteration % color_grad_interval < opt.densify_from_iter:
                     gaussians.cumulate_color_gradients()
@@ -340,7 +347,27 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
     print("PSNR: {}".format(np.mean(all_psnr)))
     print("SSIM: {}".format(np.mean(all_ssim)))
     print("LPIPS: {}".format(np.mean(all_lpips)))
-    
+
+def get_colors_for_color_grad_vis(self):
+        vals = self.gaussians.get_accumulated_color_grads_dc().cpu().numpy()  # shape (P,)
+        vals = np.maximum(vals, 1e-12)
+        vals_log = np.log(vals)
+
+        # Robust min/max to avoid outliers
+        vmin = np.percentile(vals_log, 1)
+        vmax = np.percentile(vals_log, 99)
+
+        # Normalize into [0, 1]
+        try:
+            norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
+        except:
+            print("Color gradient normalization failed, please import/install matplotlib")
+            norm = colors.Normalize(vmin=0.0, vmax=1.0, clip=True)
+        vals_norm = norm(vals_log)   # shape (P,)
+
+        # Convert to RGB
+        rgb = cm.viridis(vals_norm)[:, :3]
+        return (rgb * 255).astype(np.uint8)
 
 
 
