@@ -597,4 +597,30 @@ class GaussianModel:
     
     
         
-            
+    # Bennet New: create new gaussians colored accorsing to gradients
+    #def visualize_color_gradients(self, path):
+           
+    # Bennet New: visualize sh degrees    
+    def visualize_sh_degrees(self):
+        # Farben pro Degree (RGB, 0..1)
+        degree_colors = {
+            0: torch.tensor([0.5, 0.5, 0.5], device="cuda"),  # grau
+            1: torch.tensor([0.0, 1.0, 0.0], device="cuda"),  # grün
+            2: torch.tensor([0.0, 0.0, 1.0], device="cuda"),  # blau
+            3: torch.tensor([1.0, 0.0, 0.0], device="cuda"),  # rot      
+            }
+
+        max_defined = max(degree_colors.keys())
+
+        sh_deg = self.sh_degrees
+
+        with torch.no_grad():
+            for d in torch.unique(sh_deg):
+                d_int = int(d.item())
+                color = degree_colors[d_int] if d_int in degree_colors else degree_colors[d_int % (max_defined + 1)]
+                mask = (sh_deg == d)
+
+                self._features_dc.data[mask, 0, :] = color
+
+                if self._features_rest is not None and self._features_rest.numel() > 0:
+                    self._features_rest.data[mask, :, :] = 0.0
