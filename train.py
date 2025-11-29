@@ -173,7 +173,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.getColorGradStats(iteration)
                 if adaptive_sh and (iteration % color_grad_interval == opt.densify_from_iter):
                     # Update SH degrees based on accumulated color gradients
-                    gaussians.adapt_sh_degrees_based_on_color_grads()
+                    gaussians.increase_sh_degree_based_on_color_grads()
                     gaussians.get_sh_degree_distribution()
                 
             

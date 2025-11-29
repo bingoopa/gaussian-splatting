@@ -62,7 +62,7 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
-        try:
+        """ try:
             import pandas as pd
             print("Pandas successfully imported for getColorGradStats.")
             #pandas_installed = True
@@ -70,7 +70,7 @@ class GaussianModel:
         except ImportError:
             print("Pandas not installed, getColorGradStats will not work.")
             #pandas_installed = False TODO: remove, if color_grads are no more necessary
-            self.df = None
+            self.df = None """
         
 
         # New
@@ -631,4 +631,4 @@ class GaussianModel:
         valid = to_increase & (self.sh_degrees < self.max_sh_degree)
         self.sh_degrees[valid] += 1
         updated_percentage = valid.sum().item() / to_increase.sum().item() * 100.0 if to_increase.sum().item() > 0 else 0.0
-        print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio_threshold}")
+        print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio}")
