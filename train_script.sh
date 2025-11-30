@@ -3,7 +3,7 @@
 ###############################
 
 # Gesamtzahl der Iterationen
-ITERATIONS=5000
+ITERATIONS=3000
 
 # Checkpoints (können beliebig viele sein)
 CHECKPOINTS=(1000)
@@ -30,7 +30,7 @@ cd ~/gaussian-splatting
       --eval \
       --data_device cuda \
       --visualize_gradients \
-      --visualize_gradients_iters 1000 2000 \
+      --visualize_gradients_iters 1500\
       --adaptive_sh \
       --resolution "${RESOLUTION}" \
       --iterations "${ITERATIONS}" \
@@ -39,3 +39,5 @@ cd ~/gaussian-splatting
     echo "Training abgeschlossen."
 
     #--visualize_degrees \
+    #--visualize_gradients_iters 1000\
+    #--adaptive_sh \

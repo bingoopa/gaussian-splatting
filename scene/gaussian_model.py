@@ -491,7 +491,7 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
-
+    
     # New
     def cumulate_color_gradients(self): 
         if(self.color_denom == 0):
@@ -512,7 +512,7 @@ class GaussianModel:
         self.accum_color_grads_rest += torch.norm(self._features_rest.grad * mask.unsqueeze(-1), dim = (1, 2))
         #print("shape of self.accum_color_grads_rest after update:", self.accum_color_grads_rest.shape)
         self.color_denom += 1 
-        
+
     # New
     def color_gradients_postfix(self):
         self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -551,8 +551,7 @@ class GaussianModel:
 
         updated_percentage = valid.numel() / n_increase * 100.0
         print(f"Randomly increased SH degree for {valid.numel()} Gaussians ({updated_percentage:.2f}%), given was {fraction*100:.2f}%")
-
-    
+ 
     # New
     def getColorGradStats(self, iteration):
 
@@ -613,8 +612,8 @@ class GaussianModel:
             clone._features_dc = torch.zeros((P, 1, 3), device="cuda")
             clone._features_dc[:, 0, :] = rgb     # DC ist RGB
             # 2) SH-Rest Features: (P, num_rest_coeffs, 3)
-            max_coeffs = (self.max_sh_degree + 1) ** 2 - 1  # z. B. 15
-            clone._features_rest = torch.zeros((P, max_coeffs, 3), device="cuda")
+            #max_coeffs = (self.max_sh_degree + 1) ** 2 - 1  # z. B. 15
+            clone._features_rest = torch.zeros((P, 0, 3), device="cuda")
             # Wichtig: NICHT transponieren!
             # Der Renderer erwartet: (P, COEFF, CHANNEL)
         return clone

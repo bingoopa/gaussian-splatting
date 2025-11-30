@@ -329,10 +329,12 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
     combine_out_dir = os.path.join(model_path, "combine")
     os.makedirs(render_out_dir, exist_ok=True)
     os.makedirs(combine_out_dir, exist_ok=True)
+    """
     if args.visualize_gradients:  # BENNET: Ordner für color gradients visualisierung 
         cgrad_out_dir = os.path.join(model_path, "color_gradients") 
         os.makedirs(cgrad_out_dir, exist_ok=True)
         ply_path = os.path.join(cgrad_out_dir, "color_gradients.ply")
+    """
     if args.visualize_degrees: # BENNET: Ordner für sh-degrees visualisierung
         shdeg_out_dir = os.path.join(model_path, "sh_degrees")
         os.makedirs(shdeg_out_dir, exist_ok=True) 
@@ -362,41 +364,27 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
             scene.gaussians.visualize_sh_degrees()
             image_shdeg = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
             image_shdeg_np = (image_shdeg * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
+            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+            gt_image_np = (gt_image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
             save_path = os.path.join(shdeg_out_dir, viewpoint.image_name + ".png")
             Image.fromarray(np.concatenate((image_shdeg_np, gt_image_np), axis=1)).save(save_path)
 
+    """ super unnötig, da gradients am ende 0 
     if args.visualize_gradients:
         for idx, viewpoint in enumerate(cameras):  # BENNET: Color gradients rendern
             colored = scene.gaussians.get_colorized_copy(get_colors_for_color_grad_vis)
             image_color = torch.clamp(renderFunc(viewpoint, colored, *renderArgs)["render"], 0.0, 1.0)
             image_color_np = (image_color * 255.0).permute(1,2,0).cpu().byte().numpy()
+            gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+            gt_image_np = (gt_image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
             save_path = os.path.join(cgrad_out_dir, f"{viewpoint.image_name}.png")
             Image.fromarray(np.concatenate((image_color_np, gt_image_np), axis=1)).save(save_path)
+    """
 
     print("Evaluation results:")
     print("PSNR: {}".format(np.mean(all_psnr)))
     print("SSIM: {}".format(np.mean(all_ssim)))
     print("LPIPS: {}".format(np.mean(all_lpips)))
-
-"""
-def get_colors_for_color_grad_vis(gaussians):
-        vals = gaussians.get_accumulated_color_grads_dc.cpu().numpy()  # shape (P,)
-        vals = np.maximum(vals, 1e-12)
-        vals_log = np.log(vals)
-        # Robust min/max to avoid outliers
-        vmin = np.percentile(vals_log, 1)
-        vmax = np.percentile(vals_log, 99)
-        # Normalize into [0, 1]
-        try:
-            norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
-        except:
-            print("Color gradient normalization failed, please import/install matplotlib")
-            norm = colors.Normalize(vmin=0.0, vmax=1.0, clip=True)
-        vals_norm = norm(vals_log)   # shape (P,)
-        # Convert to RGB
-        rgb = cm.viridis(vals_norm)[:, :3]
-        return (rgb * 255).astype(np.uint8)
-"""
 
 def get_colors_for_color_grad_vis(gaussians):
     P = gaussians.get_xyz.shape[0]
@@ -418,14 +406,16 @@ def get_colors_for_color_grad_vis(gaussians):
         rest = new_rest
     # Normierung
     grad_mag = dc + rest
-    grad_mag = grad_mag / gaussians.color_denom
+    grad_mag = grad_mag / max(gaussians.color_denom, 1)
     grad_mag = grad_mag.cpu().numpy()
     # Normalisieren auf [0,1]
-    if grad_mag.max() > 0:
-        grad_mag = grad_mag / grad_mag.max()
+    grad_mag = np.maximum(grad_mag, 1e-12)     # kleine Werte schützen
+    grad_mag_log = np.log(grad_mag)            # Logarithmische Streckung
+    vmin = np.percentile(grad_mag_log, 1)      # robuste Min/Max
+    vmax = np.percentile(grad_mag_log, 99)
+    grad_mag_norm = np.clip((grad_mag_log - vmin) / (vmax - vmin), 0, 1)  # Normalisieren auf [0,1]
     # Farbmap
-    cmap = plt.get_cmap("viridis")
-    colors = (cmap(grad_mag)[:, :3] * 255).astype(np.uint8)
+    colors = (cm.viridis(grad_mag_norm)[:, :3] * 255).astype(np.uint8)
     return colors
 
 def save_color_gradient_visualization(scene, render, renderArgs, outdir, iteration): #Color gradiets: Farben setzen, szene rendern, speichern
@@ -436,8 +426,10 @@ def save_color_gradient_visualization(scene, render, renderArgs, outdir, iterati
     for viewpoint in cameras:
         image = torch.clamp(render(viewpoint, colored, *renderArgs)["render"], 0.0, 1.0)
         img_np = (image * 255).permute(1, 2, 0).cpu().byte().numpy()
+        gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+        gt_image_np = (gt_image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
         save_path = os.path.join(outdir, f"{viewpoint.image_name}.png")
-        Image.fromarray(img_np).save(save_path)
+        Image.fromarray(np.concatenate((img_np, gt_image_np), axis=1)).save(save_path)
     print(f"[ColorGradients] Saved visualization at iter {iteration} → {outdir}")
 
 if __name__ == "__main__":
