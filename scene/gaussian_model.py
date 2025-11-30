@@ -512,7 +512,7 @@ class GaussianModel:
         self.accum_color_grads_rest += torch.norm(self._features_rest.grad * mask.unsqueeze(-1), dim = (1, 2))
         #print("shape of self.accum_color_grads_rest after update:", self.accum_color_grads_rest.shape)
         self.color_denom += 1 
-
+        
     # New
     def color_gradients_postfix(self):
         self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -594,34 +594,52 @@ class GaussianModel:
         color_grads_dc = (self.accum_color_grads_dc / (self.color_denom + 1e-15))
         color_grads_rest = (self.accum_color_grads_rest / (self.color_denom + 1e-15))
         return color_grads_dc, color_grads_rest, ratios
-    
-    
-        
-    # Bennet New: create new gaussians colored accorsing to gradients
-    #def visualize_color_gradients(self, path):
-           
+
+    def get_colorized_copy(self, get_color_fun):
+        clone = GaussianModel(self.max_sh_degree)
+        with torch.no_grad():
+            # --- Basisdaten kopieren ---
+            clone._xyz = self._xyz.clone()
+            clone._scaling = self._scaling.clone()
+            clone._rotation = self._rotation.clone()
+            clone._opacity = self._opacity.clone()
+            clone.sh_degrees = self.sh_degrees.clone()
+            # --- Farben als RGB holen ---
+            rgb_np = get_color_fun(self)     # (P,3) oder (P,4)
+            rgb_np = rgb_np[:, :3]
+            rgb = torch.tensor(rgb_np, device="cuda", dtype=torch.float32) / 255.0
+            P = self.get_xyz.shape[0]
+            # 1) DC-Features korrekt anlegen → (P, 1, 3)
+            clone._features_dc = torch.zeros((P, 1, 3), device="cuda")
+            clone._features_dc[:, 0, :] = rgb     # DC ist RGB
+            # 2) SH-Rest Features: (P, num_rest_coeffs, 3)
+            max_coeffs = (self.max_sh_degree + 1) ** 2 - 1  # z. B. 15
+            clone._features_rest = torch.zeros((P, max_coeffs, 3), device="cuda")
+            # Wichtig: NICHT transponieren!
+            # Der Renderer erwartet: (P, COEFF, CHANNEL)
+        return clone
+
+    def color_gradients_postfix(self):
+        self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0],), device="cuda")
+        self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0],), device="cuda")
+        self.color_denom = 0
+      
     # Bennet New: visualize sh degrees    
     def visualize_sh_degrees(self):
-        # Farben pro Degree (RGB, 0..1)
         degree_colors = {
             0: torch.tensor([0.5, 0.5, 0.5], device="cuda"),  # grau
             1: torch.tensor([0.0, 1.0, 0.0], device="cuda"),  # grün
             2: torch.tensor([0.0, 0.0, 1.0], device="cuda"),  # blau
             3: torch.tensor([1.0, 0.0, 0.0], device="cuda"),  # rot      
             }
-
         max_defined = max(degree_colors.keys())
-
         sh_deg = self.sh_degrees
-
         with torch.no_grad():
             for d in torch.unique(sh_deg):
                 d_int = int(d.item())
                 color = degree_colors[d_int] if d_int in degree_colors else degree_colors[d_int % (max_defined + 1)]
                 mask = (sh_deg == d)
-
                 self._features_dc.data[mask, 0, :] = color
-
                 if self._features_rest is not None and self._features_rest.numel() > 0:
                     self._features_rest.data[mask, :, :] = 0.0
     
@@ -632,3 +650,5 @@ class GaussianModel:
         self.sh_degrees[valid] += 1
         updated_percentage = valid.sum().item() / to_increase.sum().item() * 100.0 if to_increase.sum().item() > 0 else 0.0
         print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio}")
+
+    

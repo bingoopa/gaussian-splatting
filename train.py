@@ -34,6 +34,7 @@ except ImportError:
 # später SH-update einbauen und matplotlib nicht mehr importieren, weil nur für Visualisierung
 import matplotlib.cm as cm
 import matplotlib.colors as colors
+import matplotlib.pyplot as plt
 
     #BENNET: Für log dateei, auskommentieren, wenn du nicht brauchst
 class Tee(object):
@@ -48,7 +49,7 @@ class Tee(object):
         self.stream.flush()
         self.file.flush()
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False, adaptive_sh = False):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False, visualize_gradients = False, visualize_gradients_iters = [0] ,adaptive_sh = False):
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
@@ -175,16 +176,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # Update SH degrees based on accumulated color gradients
                     gaussians.increase_sh_degree_based_on_color_grads()
                     gaussians.get_sh_degree_distribution()
-                
-            
-            #Für die Visualisierung der color_gradients sollte es so aussehen: Die Position im Training ist so gewählt, dass es vor der Densification passiert
-            #if need_color_grads and (iteration % color_grad_interval == opt.densify_from_iter):
-                #color_grads_dc, color_grads_rest, color_grads_ratio = gaussians.prepare_color_gradients()# -> gibt die color gradients von features_dc und features_rest sowie das Verhältnis zurück
-                #werte für RGB values berechnen aus color_grad_dc und color_grad_rest magnitude
-                #gaussians.visualize_color_gradients(color_grads_dc, color_grads_rest, color_grads_ratio, cgrad_out_dir, iteration)
-
-            
-            
+        
+            # ------------------------------
+            # Save color-gradient visualization at specific iterations
+            # ------------------------------
+            if args.visualize_gradients and iteration in args.visualize_gradients_iters:
+                outdir = os.path.join(dataset.model_path, "color_gradients_train", f"iter_{iteration}")
+                save_color_gradient_visualization(scene, render, (pipe, background), outdir, iteration)
+          
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
@@ -332,8 +331,9 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
     os.makedirs(combine_out_dir, exist_ok=True)
     if args.visualize_gradients:  # BENNET: Ordner für color gradients visualisierung 
         cgrad_out_dir = os.path.join(model_path, "color_gradients") 
-        os.makedirs(cgrad_out_dir, exist_ok=True) 
-    if args.visualize_degrees: # BENNET: Ordner für color gradients visualisierung
+        os.makedirs(cgrad_out_dir, exist_ok=True)
+        ply_path = os.path.join(cgrad_out_dir, "color_gradients.ply")
+    if args.visualize_degrees: # BENNET: Ordner für sh-degrees visualisierung
         shdeg_out_dir = os.path.join(model_path, "sh_degrees")
         os.makedirs(shdeg_out_dir, exist_ok=True) 
 
@@ -357,28 +357,35 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
         all_ssim.append(ssim_val.item())
         all_lpips.append(lpips_val.item())
 
-    if args.visualize_degrees: # BENNET: Sh-Degrees rendern
-        for idx, viewpoint in enumerate(cameras):  
+    if args.visualize_degrees: 
+        for idx, viewpoint in enumerate(cameras):  # BENNET: Sh-Degrees rendern
             scene.gaussians.visualize_sh_degrees()
             image_shdeg = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
             image_shdeg_np = (image_shdeg * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
             save_path = os.path.join(shdeg_out_dir, viewpoint.image_name + ".png")
             Image.fromarray(np.concatenate((image_shdeg_np, gt_image_np), axis=1)).save(save_path)
 
+    if args.visualize_gradients:
+        for idx, viewpoint in enumerate(cameras):  # BENNET: Color gradients rendern
+            colored = scene.gaussians.get_colorized_copy(get_colors_for_color_grad_vis)
+            image_color = torch.clamp(renderFunc(viewpoint, colored, *renderArgs)["render"], 0.0, 1.0)
+            image_color_np = (image_color * 255.0).permute(1,2,0).cpu().byte().numpy()
+            save_path = os.path.join(cgrad_out_dir, f"{viewpoint.image_name}.png")
+            Image.fromarray(np.concatenate((image_color_np, gt_image_np), axis=1)).save(save_path)
+
     print("Evaluation results:")
     print("PSNR: {}".format(np.mean(all_psnr)))
     print("SSIM: {}".format(np.mean(all_ssim)))
     print("LPIPS: {}".format(np.mean(all_lpips)))
 
-def get_colors_for_color_grad_vis(self):
-        vals = self.gaussians.get_accumulated_color_grads_dc().cpu().numpy()  # shape (P,)
+"""
+def get_colors_for_color_grad_vis(gaussians):
+        vals = gaussians.get_accumulated_color_grads_dc.cpu().numpy()  # shape (P,)
         vals = np.maximum(vals, 1e-12)
         vals_log = np.log(vals)
-
         # Robust min/max to avoid outliers
         vmin = np.percentile(vals_log, 1)
         vmax = np.percentile(vals_log, 99)
-
         # Normalize into [0, 1]
         try:
             norm = colors.Normalize(vmin=vmin, vmax=vmax, clip=True)
@@ -386,14 +393,52 @@ def get_colors_for_color_grad_vis(self):
             print("Color gradient normalization failed, please import/install matplotlib")
             norm = colors.Normalize(vmin=0.0, vmax=1.0, clip=True)
         vals_norm = norm(vals_log)   # shape (P,)
-
         # Convert to RGB
         rgb = cm.viridis(vals_norm)[:, :3]
         return (rgb * 255).astype(np.uint8)
+"""
 
+def get_colors_for_color_grad_vis(gaussians):
+    P = gaussians.get_xyz.shape[0]
+    # Falls noch keine Gradienten gesammelt wurden
+    if gaussians.color_denom == 0:
+        return np.zeros((P, 3), dtype=np.uint8)
+    # Sicherstellen, dass die Arrays die richtige Größe haben
+    dc = gaussians.accum_color_grads_dc
+    rest = gaussians.accum_color_grads_rest
+    # Falls die Gradienten noch von einer älteren Iteration stammen
+    if dc.shape[0] != P or rest.shape[0] != P:
+        # Padding mit Nullen auf aktuelle Länge
+        new_dc = torch.zeros((P,), device="cuda")
+        new_rest = torch.zeros((P,), device="cuda")
+        L = min(P, dc.shape[0])
+        new_dc[:L] = dc[:L]
+        new_rest[:L] = rest[:L]
+        dc = new_dc
+        rest = new_rest
+    # Normierung
+    grad_mag = dc + rest
+    grad_mag = grad_mag / gaussians.color_denom
+    grad_mag = grad_mag.cpu().numpy()
+    # Normalisieren auf [0,1]
+    if grad_mag.max() > 0:
+        grad_mag = grad_mag / grad_mag.max()
+    # Farbmap
+    cmap = plt.get_cmap("viridis")
+    colors = (cmap(grad_mag)[:, :3] * 255).astype(np.uint8)
+    return colors
 
-
-
+def save_color_gradient_visualization(scene, render, renderArgs, outdir, iteration): #Color gradiets: Farben setzen, szene rendern, speichern
+    gaussians = scene.gaussians
+    colored = gaussians.get_colorized_copy(get_colors_for_color_grad_vis)
+    os.makedirs(outdir, exist_ok=True)
+    cameras = scene.getTestCameras()
+    for viewpoint in cameras:
+        image = torch.clamp(render(viewpoint, colored, *renderArgs)["render"], 0.0, 1.0)
+        img_np = (image * 255).permute(1, 2, 0).cpu().byte().numpy()
+        save_path = os.path.join(outdir, f"{viewpoint.image_name}.png")
+        Image.fromarray(img_np).save(save_path)
+    print(f"[ColorGradients] Saved visualization at iter {iteration} → {outdir}")
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -417,6 +462,8 @@ if __name__ == "__main__":
     parser.add_argument("--need_color_grads", type = bool, default=False, help="Whether to track color gradients during training")
     # New argument um SH degrees zu visualisueren
     parser.add_argument("--visualize_degrees", action="store_true", help="Visualize Gaussians by SH-degree at the end of training")
+    parser.add_argument("--visualize_gradients", action="store_true", help="Visualize Gaussians by SH-degree at the end of training")
+    parser.add_argument("--visualize_gradients_iters",nargs="+",type=int,default=[],help="Iterations during training where color-gradient visualization should be saved.")
     # New argument um adaptive sh-degrees zu aktivieren basierend auf color gradients
     parser.add_argument("--adaptive_sh", action="store_true", default=False, help="Use adaptive SH degrees based on color gradients")
     args = parser.parse_args(sys.argv[1:])
@@ -432,7 +479,7 @@ if __name__ == "__main__":
         print(f"Starting GUI server on {args.ip}:{args.port}")
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees, args.adaptive_sh)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees, args.visualize_gradients, args.visualize_gradients_iters, args.adaptive_sh)
 
     # All done
     print("\nTraining complete.")
