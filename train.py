@@ -167,12 +167,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if color_grad_stats or need_color_grads:
                 color_grad_interval = 1000 # only works properly if color_grad_interval >= densify_from_iter + 1 (normally densify_from_iter=500)
                 # We average of the last 50 iters before densification -> we want to avoid effects of densification on the stats
-                if iteration % color_grad_interval >= opt.densify_from_iter - 50 and iteration % color_grad_interval < opt.densify_from_iter:
+                if iteration % color_grad_interval >= color_grad_interval - 50 and iteration >= opt.densify_from_iter:
                     gaussians.cumulate_color_gradients()
-                if color_grad_stats and (iteration % color_grad_interval == opt.densify_from_iter):
+                if color_grad_stats and (iteration % color_grad_interval == 0):
                     # Compute color gradient stats, in the current configuration at iterations 500, 5500, 10500, ...
                     gaussians.getColorGradStats(iteration)
-                if adaptive_sh and (iteration % color_grad_interval == opt.densify_from_iter):
+                if adaptive_sh and (iteration % color_grad_interval == 0):
                     # Update SH degrees based on accumulated color gradients
                     gaussians.increase_sh_degree_based_on_color_grads()
                     gaussians.get_sh_degree_distribution()
