@@ -165,7 +165,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # New: compute color gradient stats/ adapt SH degrees
             if color_grad_stats or need_color_grads:
-                color_grad_interval = 1000 # only works properly if color_grad_interval >= 51
+                color_grad_interval = 1000 # only works properly if color_grad_interval > 50, 
                 # We average of the last 50 iters before densification -> we want to avoid effects of densification on the stats
                 if iteration % color_grad_interval >= color_grad_interval - 50 and iteration >= opt.densify_from_iter:
                     gaussians.cumulate_color_gradients()
