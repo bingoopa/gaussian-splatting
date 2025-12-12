@@ -20,8 +20,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-#if color_grad_stats: Das ist nicht definiert, aber wahrscheinlich eh nicht mehr notwendig
-    #import pandas as pd
+# Neue SH Speicherung
+from sh_storage import SHStorage
 
 class GaussianModel:
 
@@ -62,6 +62,7 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
+        
         """ try:
             import pandas as pd
             print("Pandas successfully imported for getColorGradStats.")
@@ -173,6 +174,12 @@ class GaussianModel:
         # New
         self.sh_degrees = torch.zeros((fused_point_cloud.shape[0],), dtype = torch.int64, device="cuda") # Initial SH degree 0, überprüfen warum long
         #BENNET: torch.int32 zu torch.int64 geändert, hast du auch schon betrachtet, oder? 
+
+        # Neue SH Speicherung
+        self.sh_storage = SHStorage(
+            num_gaussians=fused_point_cloud.shape[0]
+        )
+        self.sh_storage.initialize_sh_from_color(fused_color)
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -450,6 +457,9 @@ class GaussianModel:
         # New
         new_sh_degrees = self.sh_degrees[selected_pts_mask].repeat(N)
 
+        # Neue SH Speicherung
+        self.sh_storage.duplicate_sh_of_gaussians(selected_pts_mask)
+
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_sh_degrees) # New: new_sh_degrees
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
@@ -469,6 +479,9 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
         # New
         new_sh_degrees = self.sh_degrees[selected_pts_mask]
+
+        # Neue SH Speicherung
+        self.sh_storage.duplicate_sh_of_gaussians(selected_pts_mask)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_sh_degrees) # New: new_sh_degrees
 
