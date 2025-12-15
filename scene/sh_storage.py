@@ -2,6 +2,15 @@ import torch
 import torch.nn as nn
 
 class SHStorage(nn.Module):
+
+    """
+        sh_coeffs_flat: (T, 3) array mit den SH Koeffizienten aller gaussians hintereinander
+        sh_degrees: (P,) array mit dem SH degree aller gaussians
+        gauss_offsets: (P,) array mit den offsets aller gaussians: gauss_offsets[i] = Index in sh_coeffs_flat,
+          an denen die SH Koeffizienten von gaussian i anfangen
+        num_coeffs_per_gauss:
+    """
+
     def __init__(self, num_gaussians, init_deg=0,
                  max_degree=3, dtype = torch.float32, device="cpu"): # CPU zum Testen ohne VM
         super().__init__()
