@@ -132,23 +132,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         with torch.no_grad():
 
-            # New: zero gradients for masked SH coefficients
-            if hasattr(gaussians, "sh_degrees") and gaussians.get_features is not None:
-                P = gaussians.get_features.shape[0]
-                num_coeffs = (gaussians.max_sh_degree + 1) ** 2
-                device = gaussians.get_features.device
-                keep_counts = ((gaussians.sh_degrees + 1) ** 2).view(P, 1).to(device) #hier sh_degree_per_point in sh_degrees geändert
-                idxs = torch.arange(num_coeffs, device=device).view(1, num_coeffs)
-                mask = (idxs < keep_counts).float()
-
-                mask_dc = mask[:, 0:1]
-                mask_rest = mask[:, 1:]
-
-                if gaussians._features_dc.grad is not None:
-                    gaussians._features_dc.grad *= mask_dc.unsqueeze(-1)
-                if gaussians._features_rest.grad is not None:
-                    gaussians._features_rest.grad *= mask_rest.unsqueeze(-1)
-
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
@@ -360,9 +343,9 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
         all_lpips.append(lpips_val.item())
 
     if args.visualize_degrees: 
+        degree_colors = torch.tensor(scene.gaussians.get_sh_degree_colors(), device="cuda", dtype=torch.float32)
         for idx, viewpoint in enumerate(cameras):  # BENNET: Sh-Degrees rendern
-            scene.gaussians.visualize_sh_degrees()
-            image_shdeg = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs)["render"], 0.0, 1.0)
+            image_shdeg = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, override_color=degree_colors)["render"], 0.0, 1.0)
             image_shdeg_np = (image_shdeg * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
             gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
             gt_image_np = (gt_image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
@@ -371,9 +354,10 @@ def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
 
     """ super unnötig, da gradients am ende 0 
     if args.visualize_gradients:
+        color_np = get_colors_for_color_grad_vis(scene.gaussians)
+        color_tensor = torch.tensor(color_np, device="cuda", dtype=torch.float32) / 255.0
         for idx, viewpoint in enumerate(cameras):  # BENNET: Color gradients rendern
-            colored = scene.gaussians.get_colorized_copy(get_colors_for_color_grad_vis)
-            image_color = torch.clamp(renderFunc(viewpoint, colored, *renderArgs)["render"], 0.0, 1.0)
+            image_color = torch.clamp(renderFunc(viewpoint, scene.gaussians, *renderArgs, override_color=color_tensor)["render"], 0.0, 1.0)
             image_color_np = (image_color * 255.0).permute(1,2,0).cpu().byte().numpy()
             gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
             gt_image_np = (gt_image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()
@@ -418,13 +402,13 @@ def get_colors_for_color_grad_vis(gaussians):
     colors = (cm.viridis(grad_mag_norm)[:, :3] * 255).astype(np.uint8)
     return colors
 
-def save_color_gradient_visualization(scene, render, renderArgs, outdir, iteration): #Color gradiets: Farben setzen, szene rendern, speichern
+def save_color_gradient_visualization(scene, render, renderArgs, outdir, iteration): #Color gradients: Farben setzen, Szene rendern, speichern
     gaussians = scene.gaussians
-    colored = gaussians.get_colorized_copy(get_colors_for_color_grad_vis)
+    colors = torch.tensor(get_colors_for_color_grad_vis(gaussians), device="cuda", dtype=torch.float32) / 255.0
     os.makedirs(outdir, exist_ok=True)
     cameras = scene.getTestCameras()
     for viewpoint in cameras:
-        image = torch.clamp(render(viewpoint, colored, *renderArgs)["render"], 0.0, 1.0)
+        image = torch.clamp(render(viewpoint, gaussians, *renderArgs, override_color=colors)["render"], 0.0, 1.0)
         img_np = (image * 255).permute(1, 2, 0).cpu().byte().numpy()
         gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
         gt_image_np = (gt_image * 255.0).permute(1, 2, 0).detach().cpu().byte().numpy()

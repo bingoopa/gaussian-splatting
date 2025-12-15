@@ -17,11 +17,14 @@ class SHStorage(nn.Module):
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.num_gauss = num_gaussians
+        self.num_gaussians = num_gaussians
         self.max_degree = max_degree
         self.device = device
         num_coeff_per_gaussian = (init_deg + 1) ** 2
         # gauss_offsets dim(P,) gibt für jeden gaussian an, an welcher Stelle seine SH coefficients anfangen
-        gauss_offsets = torch.arange(0, self.num_gauss, device = self.device) * num_coeff_per_gaussian
+        gauss_offsets = torch.arange(
+            0, self.num_gauss, device=self.device, dtype=torch.int32
+        ) * num_coeff_per_gaussian
 
         self.register_buffer(
             "gauss_offsets",
@@ -57,7 +60,41 @@ class SHStorage(nn.Module):
         self.sh_coeffs_flat = nn.Parameter(
             torch.zeros((total_coeffs, 3), device=device, dtype=dtype)
         )
-        
+        self.num_gaussians = self.num_gauss
+
+    def _segment_indices(self, offsets: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
+        """
+        Given per-gaussian offsets and counts, return the flat indices that cover
+        all corresponding coefficient segments consecutively.
+        """
+        if counts.numel() == 0:
+            return torch.zeros((0,), dtype=torch.long, device=self.device)
+
+        counts_long = counts.to(dtype=torch.long, device=self.device)
+        total = int(counts_long.sum().item())
+        if total == 0:
+            return torch.zeros((0,), dtype=torch.long, device=self.device)
+
+        prefix = torch.cumsum(counts_long, dim=0) - counts_long
+        expanded_prefix = torch.repeat_interleave(prefix, counts_long)
+        expanded_offsets = torch.repeat_interleave(offsets.to(dtype=torch.long, device=self.device), counts_long)
+        entry_idx = torch.arange(total, device=self.device, dtype=torch.long)
+        return expanded_offsets + (entry_idx - expanded_prefix)
+
+    def _gather_coeff_blocks(self, ids: torch.Tensor) -> torch.Tensor:
+        """
+        Returns a concatenated [sum(count_i), 3] tensor with all SH coefficients
+        for the provided gaussian indices.
+        """
+        if ids.numel() == 0:
+            return torch.zeros((0, 3), device=self.device, dtype=self.sh_coeffs_flat.dtype)
+
+        counts = self.num_coeffs_per_gauss[ids]
+        offsets = self.gauss_offsets[ids]
+        idx = self._segment_indices(offsets, counts)
+        if idx.numel() == 0:
+            return torch.zeros((0, 3), device=self.device, dtype=self.sh_coeffs_flat.dtype)
+        return self.sh_coeffs_flat[idx]
 
     def _repack_all(
         self,
@@ -73,12 +110,14 @@ class SHStorage(nn.Module):
         device = self.device
         N = self.num_gauss
 
+        new_degrees = new_degrees.to(device=device, dtype=torch.int32)
         new_num_coeff = (new_degrees + 1) ** 2  # dim N
 
         # alter Zustand merken
         old_flat = self.sh_coeffs_flat.data.clone()
         old_offsets = self.gauss_offsets.clone()
         old_num_coeffs_per_gauss = self.num_coeffs_per_gauss.clone()
+        total_old_coeffs = int(old_flat.shape[0])
 
         # neuen Puffer anlegen
         total_new_coeffs = int(new_num_coeff.sum().item())
@@ -89,6 +128,9 @@ class SHStorage(nn.Module):
         )
 
         new_offsets = torch.empty_like(self.gauss_offsets)
+        mapping = torch.empty(
+            total_old_coeffs, dtype=torch.long, device=device
+        ) if total_old_coeffs > 0 else torch.empty(0, dtype=torch.long, device=device)
 
         # Alle Gaussians einmal in den neuen Puffer kopieren
         cursor = 0
@@ -103,6 +145,10 @@ class SHStorage(nn.Module):
                 new_flat[cursor : cursor + old_count] = old_flat[
                     old_start : old_start + old_count
                 ]
+                if total_old_coeffs > 0:
+                    mapping[old_start : old_start + old_count] = (
+                        torch.arange(old_count, device=device, dtype=torch.long) + cursor
+                    )
             # zusätzliche Koeffs (falls degree erhöht) bleiben 0-init
             cursor += new_count
 
@@ -111,6 +157,9 @@ class SHStorage(nn.Module):
         self.gauss_offsets = new_offsets
         self.num_coeffs_per_gauss = new_num_coeff
         self.sh_degrees = new_degrees
+        self.num_gauss = N
+        self.num_gaussians = N
+        return mapping
 
     def _extend_storage(self, new_degrees: torch.Tensor, new_coeffs: torch.Tensor):
         """
@@ -121,88 +170,80 @@ class SHStorage(nn.Module):
             new_coeffs:  Tensor [sum((deg+1)^2), 3] – die SH-Koeffizienten aller neuen Gaussians
                         konkatenierte Segmente in der Reihenfolge der neuen Gaussians.
         """
+        if new_degrees.numel() == 0:
+            return
+
         device = self.device
+        new_degrees = new_degrees.to(device=device, dtype=torch.int32)
+        new_coeffs = new_coeffs.to(device)
+        new_counts = (new_degrees + 1) ** 2
+        total_new = int(new_counts.sum().item())
 
-        # Alte Werte
-        old_N = self.num_gauss
-        old_deg = self.sh_degrees.clone()
-        old_flat = self.sh_coeffs_flat.data.clone()
-        old_offsets = self.gauss_offsets.clone()
-        old_num = self.num_coeffs_per_gauss.clone()
+        if new_coeffs.shape[0] != total_new:
+            raise ValueError("Mismatch between provided coefficients and degrees.")
 
-        # Neue Werte
-        new_N = old_N + new_degrees.shape[0]
-        all_degrees = torch.cat([old_deg, new_degrees.to(device)], dim=0)
-        all_num = (all_degrees + 1)**2
+        base_offset = self.sh_coeffs_flat.shape[0]
+        appended_offsets = base_offset + torch.cumsum(new_counts, dim=0) - new_counts
 
-        # Neuen flachen Speicher allozieren
-        total_new_coeffs = int(all_num.sum().item())
-        new_flat = torch.zeros(
-            (total_new_coeffs, 3), device=device, dtype=self.sh_coeffs_flat.dtype
-        )
-        new_offsets = torch.empty(new_N, dtype=torch.int32, device=device)
-
-        # --- Kopieren der alten Gaussians ---
-        cursor = 0
-        for i in range(old_N):
-            count = int(old_num[i].item())
-            start = int(old_offsets[i].item())
-            new_offsets[i] = cursor
-
-            if count > 0:
-                new_flat[cursor : cursor + count] = old_flat[start : start + count]
-
-            cursor += count
-
-        # --- Kopieren der neuen Gaussians ---
-        new_cursor = 0
-        for j in range(new_degrees.shape[0]):
-            deg_j = int(new_degrees[j].item())
-            count_j = (deg_j + 1)**2
-
-            new_offsets[old_N + j] = cursor
-            new_flat[cursor : cursor + count_j] = new_coeffs[new_cursor : new_cursor + count_j]
-
-            cursor += count_j
-            new_cursor += count_j
-
-        # Speicher aktualisieren
-        self.sh_coeffs_flat = nn.Parameter(new_flat)
-        self.gauss_offsets = new_offsets
-        self.num_coeffs_per_gauss = all_num
-        self.sh_degrees = all_degrees
-        self.num_gauss = new_N
+        self.sh_coeffs_flat = nn.Parameter(torch.cat([self.sh_coeffs_flat, new_coeffs], dim=0))
+        self.gauss_offsets = torch.cat([self.gauss_offsets, appended_offsets.to(torch.int32)], dim=0)
+        self.num_coeffs_per_gauss = torch.cat([self.num_coeffs_per_gauss, new_counts.to(torch.int32)], dim=0)
+        self.sh_degrees = torch.cat([self.sh_degrees, new_degrees], dim=0)
+        self.num_gauss += new_degrees.shape[0]
+        self.num_gaussians = self.num_gauss
 
     
     def duplicate_sh_of_gaussians(self, clone_ids: torch.Tensor):
 
         device = self.device
+        if clone_ids.dtype == torch.bool:
+            clone_ids = torch.nonzero(clone_ids, as_tuple=False).squeeze(-1)
         clone_ids = clone_ids.to(device).long()
+        if clone_ids.numel() == 0:
+            return None
 
         # Degrees der neuen Gaussians
         new_degrees = self.sh_degrees[clone_ids].clone()
 
-        # Sammle alle Koeffizienten der zu klonenden/splittenden gaussians in einem flachen Block
-        coeff_blocks = []
-        for id in clone_ids:
-            id = int(id.item())
-            start = int(self.gauss_offsets[id].item())
-            count = int(self.num_coeffs_per_gauss[id].item())
-            coeff_blocks.append(self.sh_coeffs_flat[start : start + count])
-
-        if len(coeff_blocks) > 0:
-            new_coeffs = torch.cat(coeff_blocks, dim=0)
-        else:
-            new_coeffs = torch.zeros((0, 3), device=device, dtype=self.sh_coeffs_flat.dtype)
+        # Sammle alle Koeffizienten der zu klonenden/splittenden Gaussians
+        new_coeffs = self._gather_coeff_blocks(clone_ids)
 
         # Storage erweitern
         self._extend_storage(new_degrees=new_degrees, new_coeffs=new_coeffs)
+        return new_coeffs
+
+    def prune_gaussians(self, keep_mask: torch.Tensor, new_param: torch.nn.Parameter = None):
+        """
+        Removes Gaussians that are marked False in keep_mask and compacts storage.
+        """
+        keep_mask = keep_mask.to(self.device)
+        if keep_mask.dtype != torch.bool:
+            keep_mask = keep_mask.bool()
+
+        keep_ids = torch.nonzero(keep_mask, as_tuple=False).squeeze(-1)
+        new_N = int(keep_ids.shape[0])
+        if new_N == self.num_gauss:
+            return
+
+        new_counts = self.num_coeffs_per_gauss[keep_ids]
+        new_offsets = torch.cumsum(new_counts, dim=0) - new_counts
+
+        if new_param is not None:
+            self.sh_coeffs_flat = new_param
+        else:
+            gathered = self._gather_coeff_blocks(keep_ids)
+            self.sh_coeffs_flat = nn.Parameter(gathered)
+        self.gauss_offsets = new_offsets.to(torch.int32)
+        self.num_coeffs_per_gauss = new_counts
+        self.sh_degrees = self.sh_degrees[keep_ids]
+        self.num_gauss = new_N
+        self.num_gaussians = new_N
 
 
 
     
     def set_base_color(self, colors):
-        self.coeffs_flat[self.gauss_offsets] = colors
+        self.sh_coeffs_flat[self.gauss_offsets] = colors
 
 
     def increase_degree(
@@ -218,7 +259,7 @@ class SHStorage(nn.Module):
         hard_max_degree: optionaler Cap, damit man nicht über L_max hinausgeht.
         """
         if gauss_ids.numel() == 0:
-            return
+            return None
 
         gauss_ids = gauss_ids.to(self.device).long()
 
@@ -234,9 +275,9 @@ class SHStorage(nn.Module):
 
         # nur wirklich erhöhte Gaussians betrachten
         if torch.equal(target_deg, current_deg):
-            return  # nichts zu tun
+            return None  # nichts zu tun
 
-        self._repack_all(target_deg)
+        return self._repack_all(target_deg)
 
     
     def initialize_sh_from_color(self, colors: torch.Tensor):
@@ -251,10 +292,8 @@ class SHStorage(nn.Module):
         N = self.num_gaussians
         assert colors.shape[0] == N, "Color length must match number of Gaussians"
 
-        offsets = self.gauss_offsets  
-        for i in range(N):
-            idx = int(offsets[i].item())
-            self.sh_coeffs_flat.data[idx] = colors[i]
+        offsets = self.gauss_offsets.long()
+        self.sh_coeffs_flat.data[offsets] = colors
 
 
 
@@ -323,3 +362,33 @@ class SHStorage(nn.Module):
                 dense[i, :, :c] = coeffs_i.transpose(0, 1)
 
             return dense
+
+    def serialize(self):
+        return {
+            "sh_coeffs_flat": self.sh_coeffs_flat.detach().clone(),
+            "gauss_offsets": self.gauss_offsets.detach().clone(),
+            "num_coeffs_per_gauss": self.num_coeffs_per_gauss.detach().clone(),
+            "sh_degrees": self.sh_degrees.detach().clone(),
+            "max_degree": self.max_degree,
+        }
+
+    @classmethod
+    def from_serialized(cls, data, device="cuda"):
+        coeffs = data["sh_coeffs_flat"].to(device)
+        offsets = data["gauss_offsets"].to(device).to(torch.int32)
+        counts = data["num_coeffs_per_gauss"].to(device).to(torch.int32)
+        degrees = data["sh_degrees"].to(device).to(torch.int32)
+        num_gauss = int(offsets.shape[0])
+        storage = cls(
+            num_gaussians=num_gauss,
+            init_deg=0,
+            max_degree=int(data.get("max_degree", 3)),
+            device=device,
+        )
+        storage.gauss_offsets = offsets
+        storage.num_coeffs_per_gauss = counts
+        storage.sh_degrees = degrees
+        storage.sh_coeffs_flat = nn.Parameter(coeffs)
+        storage.num_gauss = num_gauss
+        storage.num_gaussians = num_gauss
+        return storage

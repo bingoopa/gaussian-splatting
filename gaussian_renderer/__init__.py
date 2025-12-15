@@ -67,20 +67,47 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
-    shs = None
+    sh_packed = None
+    sh_offsets = None
+    sh_degrees = None
     colors_precomp = None
     if override_color is None:
         if pipe.convert_SHs_python: # Diese Option soll nicht mehr genutzt werden
-            shs_view = pc.get_features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
-            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(pc.get_features.shape[0], 1))
+            features = pc.get_features
+            if features is None:
+                raise RuntimeError("Packed SH storage is required for python SH conversion")
+            shs_view = features.transpose(1, 2).view(-1, 3, (pc.max_sh_degree+1)**2)
+            dir_pp = (pc.get_xyz - viewpoint_camera.camera_center.repeat(features.shape[0], 1))
             dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
 
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
-            # Das muss geändert werden, Im folgenden Aufruf von rasterizer() müssen die Infos vom sh_storage von pc übergeben werden
-            # (sh_degrees, sh_coeffs_flat, gauss_offsets)
-            shs = pc.get_features
+            if not hasattr(pc, "sh_storage") or pc.sh_storage is None:
+                raise RuntimeError("GaussianModel is missing sh_storage required for packed SH rendering")
+            storage = pc.sh_storage
+            device = pc.get_xyz.device
+            if storage.sh_coeffs_flat.device != device:
+                storage = storage.to(device)
+                pc.sh_storage = storage
+
+            def _prepare(tensor: torch.Tensor, dtype=None):
+                if tensor is None:
+                    return None
+                opts = {}
+                if dtype is not None and tensor.dtype != dtype:
+                    opts["dtype"] = dtype
+                if tensor.device != device:
+                    opts["device"] = device
+                if opts:
+                    tensor = tensor.to(**opts)
+                if not tensor.is_contiguous():
+                    tensor = tensor.contiguous()
+                return tensor
+
+            sh_packed = _prepare(storage.sh_coeffs_flat, dtype=storage.sh_coeffs_flat.dtype)
+            sh_offsets = _prepare(storage.gauss_offsets, dtype=torch.int32)
+            sh_degrees = _prepare(storage.sh_degrees, dtype=torch.int16)
     else:
         colors_precomp = override_color
 
@@ -88,7 +115,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     rendered_image, radii = rasterizer(
         means3D = means3D,
         means2D = means2D,
-        shs = shs,
+        sh_packed = sh_packed,
+        sh_offsets = sh_offsets,
+        sh_degrees = sh_degrees,
         colors_precomp = colors_precomp,
         opacities = opacity,
         scales = scales,

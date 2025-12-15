@@ -3,7 +3,7 @@
 ###############################
 
 # Gesamtzahl der Iterationen
-ITERATIONS=3000
+ITERATIONS=10000
 
 # Checkpoints (können beliebig viele sein)
 CHECKPOINTS=(1000)
@@ -29,9 +29,10 @@ cd ~/gaussian-splatting
       -s "${SOURCE_PATH}" \
       --eval \
       --data_device cuda \
-      --visualize_gradients \
-      --visualize_gradients_iters 1500\
       --adaptive_sh \
+      --visualize_degrees \
+      --visualize_gradients \
+      --visualize_gradients_iters 2500 4500 7500\
       --resolution "${RESOLUTION}" \
       --iterations "${ITERATIONS}" \
       #--sh_percentage "${PERCENTAGE}" "${EVERY}" \

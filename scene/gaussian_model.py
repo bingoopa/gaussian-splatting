@@ -20,8 +20,12 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 # Neue SH Speicherung
-from sh_storage import SHStorage
+from .sh_storage import SHStorage
 
 class GaussianModel:
 
@@ -47,8 +51,6 @@ class GaussianModel:
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0)
-        self._features_dc = torch.empty(0)
-        self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
@@ -62,68 +64,199 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
-        
-        """ try:
-            import pandas as pd
-            print("Pandas successfully imported for getColorGradStats.")
-            #pandas_installed = True
+        if pd is not None:
             self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees'])
-        except ImportError:
-            print("Pandas not installed, getColorGradStats will not work.")
-            #pandas_installed = False TODO: remove, if color_grads are no more necessary
-            self.df = None """
-        
+        else:
+            self.df = None
 
-        # New
-        self.sh_degrees = torch.empty(0, dtype=torch.int64, device="cuda")
+        # SH storage
+        self.sh_storage = None
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.sh_degrees = torch.empty(0, dtype=torch.int64, device=device)
 
 
         self.setup_functions()
 
     def capture(self):
-        return (
-            self.active_sh_degree,
-            self._xyz,
-            self._features_dc,
-            self._features_rest,
-            self._scaling,
-            self._rotation,
-            self._opacity,
-            self.max_radii2D,
-            self.xyz_gradient_accum,
-            self.denom,
-            self.optimizer.state_dict(),
-            self.spatial_lr_scale,
-            # New
-            self.accum_color_grads_dc,
-            self.accum_color_grads_rest,
-            self.color_denom,
-            self.df,
-            self.sh_degrees
-        )
+        sh_state = self.sh_storage.serialize() if self.sh_storage is not None else None
+        return {
+            "active_sh_degree": self.active_sh_degree,
+            "xyz": self._xyz,
+            "scaling": self._scaling,
+            "rotation": self._rotation,
+            "opacity": self._opacity,
+            "max_radii2D": self.max_radii2D,
+            "xyz_gradient_accum": self.xyz_gradient_accum,
+            "denom": self.denom,
+            "optimizer_state": self.optimizer.state_dict() if self.optimizer is not None else None,
+            "spatial_lr_scale": self.spatial_lr_scale,
+            "accum_color_grads_dc": self.accum_color_grads_dc,
+            "accum_color_grads_rest": self.accum_color_grads_rest,
+            "color_denom": self.color_denom,
+            "df": self.df,
+            "sh_degrees": self.sh_degrees,
+            "sh_state": sh_state,
+        }
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale, 
-        self.accum_color_grads_dc,
-        self.accum_color_grads_rest,
-        self.color_denom,
-        self.df,
-        self.sh_degrees) = model_args # New: sh_degrees and color grad stats
+        if isinstance(model_args, dict):
+            state = model_args
+        else:
+            state = self._convert_legacy_state(model_args)
+
+        self.active_sh_degree = state["active_sh_degree"]
+        self._xyz = state["xyz"]
+        self._scaling = state["scaling"]
+        self._rotation = state["rotation"]
+        self._opacity = state["opacity"]
+        self.max_radii2D = state["max_radii2D"]
+        self.spatial_lr_scale = state["spatial_lr_scale"]
+        self.accum_color_grads_dc = state["accum_color_grads_dc"]
+        self.accum_color_grads_rest = state["accum_color_grads_rest"]
+        self.color_denom = state["color_denom"]
+        self.df = state.get("df", None)
+        sh_state = state.get("sh_state", None)
+        if sh_state is not None:
+            self.sh_storage = SHStorage.from_serialized(sh_state, device=self._xyz.device)
+        else:
+            dense = state["dense_sh"]
+            sh_degrees = state["sh_degrees"]
+            self.sh_storage = self._build_storage_from_dense(dense, sh_degrees)
+        self._sync_sh_degrees_from_storage()
+
         self.training_setup(training_args)
-        self.xyz_gradient_accum = xyz_gradient_accum
-        self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
+        self.xyz_gradient_accum = state["xyz_gradient_accum"]
+        self.denom = state["denom"]
+        opt_state = state.get("optimizer_state", None)
+        if opt_state is not None:
+            self.optimizer.load_state_dict(opt_state)
+
+    def _convert_legacy_state(self, legacy_tuple):
+        (
+            active_sh_degree,
+            xyz,
+            features_dc,
+            features_rest,
+            scaling,
+            rotation,
+            opacity,
+            max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            spatial_lr_scale,
+            accum_color_grads_dc,
+            accum_color_grads_rest,
+            color_denom,
+            df,
+            sh_degrees,
+        ) = legacy_tuple
+        dense = torch.cat(
+            (
+                features_dc.detach().transpose(1, 2),
+                features_rest.detach().transpose(1, 2),
+            ),
+            dim=2,
+        )
+        return {
+            "active_sh_degree": active_sh_degree,
+            "xyz": xyz,
+            "scaling": scaling,
+            "rotation": rotation,
+            "opacity": opacity,
+            "max_radii2D": max_radii2D,
+            "xyz_gradient_accum": xyz_gradient_accum,
+            "denom": denom,
+            "optimizer_state": opt_dict,
+            "spatial_lr_scale": spatial_lr_scale,
+            "accum_color_grads_dc": accum_color_grads_dc,
+            "accum_color_grads_rest": accum_color_grads_rest,
+            "color_denom": color_denom,
+            "df": df,
+            "sh_degrees": sh_degrees,
+            "dense_sh": dense,
+            "sh_state": None,
+        }
+
+    def _build_storage_from_dense(self, dense_sh, sh_degrees):
+        device = dense_sh.device
+        num_gauss = dense_sh.shape[0]
+        storage = SHStorage(
+            num_gaussians=num_gauss,
+            init_deg=0,
+            max_degree=self.max_sh_degree,
+            device=device,
+        )
+        degrees_i32 = sh_degrees.to(device=device, dtype=torch.int32)
+        counts = (degrees_i32 + 1) ** 2
+        offsets = torch.cumsum(counts, dim=0) - counts
+        total = int(counts.sum().item())
+        flat = torch.zeros((total, 3), device=device, dtype=dense_sh.dtype)
+        cursor = 0
+        for i in range(num_gauss):
+            count = int(counts[i].item())
+            if count > 0:
+                flat[cursor : cursor + count] = dense_sh[i, :, :count].transpose(0, 1)
+            cursor += count
+        storage.sh_coeffs_flat = nn.Parameter(flat)
+        storage.gauss_offsets = offsets.to(torch.int32)
+        storage.num_coeffs_per_gauss = counts
+        storage.sh_degrees = degrees_i32
+        storage.num_gauss = num_gauss
+        storage.num_gaussians = num_gauss
+        return storage
+
+    def _sync_sh_degrees_from_storage(self):
+        if self.sh_storage is None:
+            device = self._xyz.device if self._xyz.numel() else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.sh_degrees = torch.empty(0, dtype=torch.int64, device=device)
+            return
+        device = self.sh_storage.sh_coeffs_flat.device
+        self.sh_degrees = self.sh_storage.sh_degrees.to(device=device, dtype=torch.int64)
+
+    def _remap_sh_optimizer(self, mapping):
+        if self.optimizer is None:
+            return
+        for group in self.optimizer.param_groups:
+            if group["name"] != "sh_coeffs":
+                continue
+            old_param = group["params"][0]
+            new_param = self.sh_storage.sh_coeffs_flat
+            new_param.requires_grad_(True)
+            group["params"][0] = new_param
+            old_state = self.optimizer.state.pop(old_param, None)
+            if old_state is None:
+                self.optimizer.state[new_param] = {
+                    "step": torch.tensor(0.0, device=new_param.device),
+                    "exp_avg": torch.zeros_like(new_param),
+                    "exp_avg_sq": torch.zeros_like(new_param),
+                }
+                return
+            new_state = {}
+            new_state["step"] = old_state.get("step", torch.tensor(0.0, device=new_param.device))
+            for key in ("exp_avg", "exp_avg_sq"):
+                src = old_state.get(key, None)
+                if src is None:
+                    new_state[key] = torch.zeros_like(new_param)
+                    continue
+                new_tensor = torch.zeros_like(new_param)
+                if mapping is not None and mapping.numel() == src.shape[0]:
+                    new_tensor[mapping] = src
+                else:
+                    length = min(src.shape[0], new_tensor.shape[0])
+                    if length > 0:
+                        new_tensor[:length] = src[:length]
+                new_state[key] = new_tensor
+            self.optimizer.state[new_param] = new_state
+            return
+
+    def _apply_new_sh_degrees(self, new_degrees):
+        if self.sh_storage is None:
+            return
+        new_degrees = new_degrees.to(device=self.sh_storage.sh_coeffs_flat.device, dtype=torch.int32)
+        mapping = self.sh_storage._repack_all(new_degrees)
+        self._sync_sh_degrees_from_storage()
+        self._remap_sh_optimizer(mapping)
 
     @property
     def get_scaling(self):
@@ -139,9 +272,10 @@ class GaussianModel:
     
     @property
     def get_features(self):
-        features_dc = self._features_dc
-        features_rest = self._features_rest
-        return torch.cat((features_dc, features_rest), dim=1)
+        if not hasattr(self, "sh_storage"):
+            return None
+        dense = self.sh_storage.build_dense_sh(self.max_sh_degree)  # [N, 3, K]
+        return dense.permute(0, 2, 1).contiguous()
     
     @property
     def get_opacity(self):
@@ -167,19 +301,15 @@ class GaussianModel:
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
-        features = torch.zeros((fused_color.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
-        features[:, :3, 0 ] = fused_color
-        features[:, 3:, 1:] = 0.0
-
-        # New
-        self.sh_degrees = torch.zeros((fused_point_cloud.shape[0],), dtype = torch.int64, device="cuda") # Initial SH degree 0, überprüfen warum long
-        #BENNET: torch.int32 zu torch.int64 geändert, hast du auch schon betrachtet, oder? 
 
         # Neue SH Speicherung
         self.sh_storage = SHStorage(
-            num_gaussians=fused_point_cloud.shape[0]
+            num_gaussians=fused_point_cloud.shape[0],
+            device=fused_point_cloud.device,
+            max_degree=self.max_sh_degree,
         )
         self.sh_storage.initialize_sh_from_color(fused_color)
+        self._sync_sh_degrees_from_storage()
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -191,25 +321,24 @@ class GaussianModel:
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-        self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
     def training_setup(self, training_args):
+        if self.sh_storage is None:
+            raise RuntimeError("SHStorage must be initialized before training_setup")
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
-            {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
-            {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': [self.sh_storage.sh_coeffs_flat], 'lr': training_args.feature_lr, "name": "sh_coeffs"},
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -228,11 +357,11 @@ class GaussianModel:
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
-        # All channels except the 3 DC
-        for i in range(self._features_dc.shape[1]*self._features_dc.shape[2]):
-            l.append('f_dc_{}'.format(i))
-        for i in range(self._features_rest.shape[1]*self._features_rest.shape[2]):
-            l.append('f_rest_{}'.format(i))
+        max_coeffs = (self.max_sh_degree + 1) ** 2
+        for i in range(3):
+            l.append(f'f_dc_{i}')
+        for i in range(max(0, 3 * (max_coeffs - 1))):
+            l.append(f'f_rest_{i}')
         l.append('opacity')
         for i in range(self._scaling.shape[1]):
             l.append('scale_{}'.format(i))
@@ -245,8 +374,13 @@ class GaussianModel:
 
         xyz = self._xyz.detach().cpu().numpy()
         normals = np.zeros_like(xyz)
-        f_dc = self._features_dc.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        f_rest = self._features_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        dense = self.sh_storage.build_dense_sh(self.max_sh_degree)
+        f_dc = dense[:, :, :1].transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        rest = dense[:, :, 1:]
+        if rest.numel() > 0:
+            f_rest = rest.transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        else:
+            f_rest = np.zeros((xyz.shape[0], 0), dtype=np.float32)
         opacities = self._opacity.detach().cpu().numpy()
         scale = self._scaling.detach().cpu().numpy()
         rotation = self._rotation.detach().cpu().numpy()
@@ -308,8 +442,6 @@ class GaussianModel:
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._features_dc = nn.Parameter(torch.tensor(features_dc, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
-        self._features_rest = nn.Parameter(torch.tensor(features_extra, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
@@ -317,16 +449,20 @@ class GaussianModel:
         # New
         try:
             sh_deg = np.asarray(plydata.elements[0]["sh_degrees"]).astype(np.int64)
-            self.sh_degrees = torch.tensor(sh_deg, dtype=torch.int64, device="cuda")
-            # set the active global degree to the maximum of the existing sh-degrees (keeps compatibility, but not necessary)
-            self.active_sh_degree = int(self.sh_degrees.max())
+            sh_degrees = torch.tensor(sh_deg, dtype=torch.int64, device="cuda")
         except Exception:
             # no per-vertex sh_degree stored: enable all coefficients
             P = xyz.shape[0]
-            self.sh_degrees = torch.full((P,), self.max_sh_degree, dtype=torch.int64, device="cuda")
-            self.active_sh_degree = self.max_sh_degree
+            sh_degrees = torch.full((P,), self.max_sh_degree, dtype=torch.int64, device="cuda")
 
-        #self.active_sh_degree = self.max_sh_degree
+        dense = torch.tensor(
+            np.concatenate((features_dc, features_extra), axis=2),
+            dtype=torch.float,
+            device="cuda",
+        )
+        self.sh_storage = self._build_storage_from_dense(dense, sh_degrees)
+        self._sync_sh_degrees_from_storage()
+        self.active_sh_degree = int(self.sh_degrees.max().item()) if self.sh_degrees.numel() > 0 else 0
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
@@ -343,31 +479,39 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
-    def _prune_optimizer(self, mask):
+    def _prune_optimizer(self, mask, extra_masks=None):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            name = group["name"]
+            param_mask = mask
+            if extra_masks and name in extra_masks:
+                param_mask = extra_masks[name]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+                stored_state["exp_avg"] = stored_state["exp_avg"][param_mask]
+                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][param_mask]
 
                 del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                group["params"][0] = nn.Parameter((group["params"][0][param_mask].requires_grad_(True)))
                 self.optimizer.state[group['params'][0]] = stored_state
 
-                optimizable_tensors[group["name"]] = group["params"][0]
+                optimizable_tensors[name] = group["params"][0]
             else:
-                group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
-                optimizable_tensors[group["name"]] = group["params"][0]
+                group["params"][0] = nn.Parameter(group["params"][0][param_mask].requires_grad_(True))
+                optimizable_tensors[name] = group["params"][0]
         return optimizable_tensors
 
     def prune_points(self, mask):
         valid_points_mask = ~mask
-        optimizable_tensors = self._prune_optimizer(valid_points_mask)
+        counts = self.sh_storage.num_coeffs_per_gauss.to(device=valid_points_mask.device)
+        if counts.shape[0] != valid_points_mask.shape[0]:
+            raise RuntimeError(
+                f"Mismatch between coeff counts ({counts.shape[0]}) and gaussian mask ({valid_points_mask.shape[0]})"
+            )
+        coeff_mask = torch.repeat_interleave(valid_points_mask.to(dtype=torch.long), counts).bool()
+        optimizable_tensors = self._prune_optimizer(valid_points_mask, {"sh_coeffs": coeff_mask})
 
         self._xyz = optimizable_tensors["xyz"]
-        self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
@@ -378,14 +522,47 @@ class GaussianModel:
         self.max_radii2D = self.max_radii2D[valid_points_mask]
 
         # New
-        self.sh_degrees = self.sh_degrees[valid_points_mask]
+        self.sh_storage.prune_gaussians(valid_points_mask, optimizable_tensors.get("sh_coeffs"))
+        self._sync_sh_degrees_from_storage()
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             assert len(group["params"]) == 1
-            extension_tensor = tensors_dict[group["name"]]
+            name = group["name"]
+            if name not in tensors_dict:
+                continue
+            extension_tensor = tensors_dict[name]
+            if extension_tensor is None:
+                continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
+            if name == "sh_coeffs":
+                old_param = group["params"][0]
+                new_param = self.sh_storage.sh_coeffs_flat
+                add_rows = new_param.shape[0] - old_param.shape[0]
+                if add_rows < 0:
+                    raise RuntimeError("Packed SH parameter shrank unexpectedly during densification")
+                if stored_state is None:
+                    stored_state = {
+                        "exp_avg": torch.zeros_like(new_param),
+                        "exp_avg_sq": torch.zeros_like(new_param),
+                    }
+                else:
+                    zeros_shape = (add_rows,) + stored_state["exp_avg"].shape[1:]
+                    device = stored_state["exp_avg"].device
+                    dtype = stored_state["exp_avg"].dtype
+                    stored_state["exp_avg"] = torch.cat(
+                        (stored_state["exp_avg"], torch.zeros(zeros_shape, device=device, dtype=dtype)),
+                        dim=0)
+                    stored_state["exp_avg_sq"] = torch.cat(
+                        (stored_state["exp_avg_sq"], torch.zeros(zeros_shape, device=device, dtype=dtype)),
+                        dim=0)
+                if old_param in self.optimizer.state:
+                    del self.optimizer.state[old_param]
+                group["params"][0] = new_param
+                self.optimizer.state[new_param] = stored_state
+                optimizable_tensors[name] = new_param
+                continue
             if stored_state is not None:
 
                 stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
@@ -395,44 +572,35 @@ class GaussianModel:
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
                 self.optimizer.state[group['params'][0]] = stored_state
 
-                optimizable_tensors[group["name"]] = group["params"][0]
+                optimizable_tensors[name] = group["params"][0]
             else:
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
-                optimizable_tensors[group["name"]] = group["params"][0]
+                optimizable_tensors[name] = group["params"][0]
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_sh_degrees=None): #BENNET: New argument: new_sh_degrees=None
-        d = {"xyz": new_xyz,
-        "f_dc": new_features_dc,
-        "f_rest": new_features_rest,
-        "opacity": new_opacities,
-        "scaling" : new_scaling,
-        "rotation" : new_rotation}
+    def densification_postfix(self, new_xyz, new_opacities, new_scaling, new_rotation, new_sh_coeffs=None):
+        d = {
+            "xyz": new_xyz,
+            "opacity": new_opacities,
+            "scaling": new_scaling,
+            "rotation": new_rotation,
+        }
+        if new_sh_coeffs is not None:
+            d["sh_coeffs"] = new_sh_coeffs
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
-        self._features_dc = optimizable_tensors["f_dc"]
-        self._features_rest = optimizable_tensors["f_rest"]
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        if "sh_coeffs" in optimizable_tensors:
+            self.sh_storage.sh_coeffs_flat = optimizable_tensors["sh_coeffs"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
-
-        # New: set sh-degrees for new points (set 0 if not provided)
-        #if new_sh_degrees is None:
-        #    new_sh_degrees = torch.zeros((new_xyz.shape[0],), dtype=torch.int32, device="cuda")
-        #self.sh_degrees = torch.cat((self.sh_degrees, new_sh_degrees), dim=0)
-        #BENNET: geändert, um dtype und device zu gewährleisten
-        if new_sh_degrees is None:
-            new_sh_degrees = torch.zeros((new_xyz.shape[0],), dtype=self.sh_degrees.dtype, device=self.sh_degrees.device)
-        else:
-            # ensure same dtype and device
-            new_sh_degrees = new_sh_degrees.to(dtype=self.sh_degrees.dtype, device=self.sh_degrees.device)
-        self.sh_degrees = torch.cat((self.sh_degrees, new_sh_degrees), dim=0)
+        self._sync_sh_degrees_from_storage()
 
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2): #TODO: hier sollen sh-degrees mitkopiert werden beim splitting
@@ -444,6 +612,10 @@ class GaussianModel:
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
 
+        selected_indices = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
+        if selected_indices.numel() == 0:
+            return
+
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
@@ -451,16 +623,12 @@ class GaussianModel:
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
-        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
-        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        # New
-        new_sh_degrees = self.sh_degrees[selected_pts_mask].repeat(N)
-
         # Neue SH Speicherung
-        self.sh_storage.duplicate_sh_of_gaussians(selected_pts_mask)
+        clone_ids = selected_indices.repeat_interleave(N)
+        new_sh_coeffs = self.sh_storage.duplicate_sh_of_gaussians(clone_ids)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_sh_degrees) # New: new_sh_degrees
+        self.densification_postfix(new_xyz, new_opacity, new_scaling, new_rotation, new_sh_coeffs=new_sh_coeffs)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -472,18 +640,13 @@ class GaussianModel:
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         
         new_xyz = self._xyz[selected_pts_mask]
-        new_features_dc = self._features_dc[selected_pts_mask]
-        new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
-        # New
-        new_sh_degrees = self.sh_degrees[selected_pts_mask]
-
         # Neue SH Speicherung
-        self.sh_storage.duplicate_sh_of_gaussians(selected_pts_mask)
+        new_sh_coeffs = self.sh_storage.duplicate_sh_of_gaussians(selected_pts_mask)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_sh_degrees) # New: new_sh_degrees
+        self.densification_postfix(new_xyz, new_opacities, new_scaling, new_rotation, new_sh_coeffs=new_sh_coeffs)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -511,40 +674,49 @@ class GaussianModel:
             print("Initializing color gradient accumulation tensors...")
             self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0],), device="cuda")
             self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0],), device = "cuda")
-        max_num_coeffs = (self.max_sh_degree + 1) **2 - 1
-        num_coeffs = ((self.sh_degrees +1)**2 - 1).view(-1, 1)
-        idxs = torch.arange(0, max_num_coeffs, device="cuda").view(1, -1)
-        mask = (idxs < num_coeffs).float().view(-1, max_num_coeffs)
-        #assert self._features_rest.shape == mask.shape, f"Wrong shape of mask: feature_rest gradient shape: {self._features_rest.shape}, mask shape: {mask.shape}"
-    #print("shape of self._features_rest.grad:", self._features_rest.grad.shape)
-    #print("shape of self._features_dc.grad:", self._features_dc.grad.shape)
-    #print("shape of accum_color_grads_dc:", self.accum_color_grads_dc.shape)
-    #print("shape of accum_color_grads_rest:", self.accum_color_grads_rest.shape)
-    #print("shape of mask:", mask.shape)
-        self.accum_color_grads_dc += torch.norm(self._features_dc.grad, dim = -1).squeeze(-1)
-        self.accum_color_grads_rest += torch.norm(self._features_rest.grad * mask.unsqueeze(-1), dim = (1, 2))
-        #print("shape of self.accum_color_grads_rest after update:", self.accum_color_grads_rest.shape)
+        if self.sh_storage.sh_coeffs_flat.grad is None:
+            return
+
+        grad = self.sh_storage.sh_coeffs_flat.grad
+        device = grad.device
+        grad_norm = torch.norm(grad, dim=1)
+        counts = self.sh_storage.num_coeffs_per_gauss.to(device=device, dtype=torch.long)
+        total = int(counts.sum().item())
+        if total == 0:
+            return
+        gauss_ids = torch.repeat_interleave(torch.arange(counts.shape[0], device=device, dtype=torch.long), counts)
+        local_idx = torch.arange(total, device=device, dtype=torch.long) - torch.repeat_interleave(torch.cumsum(counts, dim=0) - counts, counts)
+
+        dc_mask = local_idx == 0
+        rest_mask = ~dc_mask
+
+        dc_accum = torch.zeros(counts.shape[0], device=device)
+        rest_accum = torch.zeros(counts.shape[0], device=device)
+        dc_accum.scatter_add_(0, gauss_ids[dc_mask], grad_norm[dc_mask])
+        rest_accum.scatter_add_(0, gauss_ids[rest_mask], grad_norm[rest_mask])
+
+        self.accum_color_grads_dc += dc_accum
+        self.accum_color_grads_rest += rest_accum
         self.color_denom += 1 
 
-    # New
-    def color_gradients_postfix(self):
-        self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0], 1), device = "cuda")
-        self.color_denom = 0
 
     # New methods for SH degree management
     def get_max_sh_degree_in_model(self):
         return int(self.sh_degrees.max())
     
     def set_sh_degrees_by_indices(self, indices, degree):
+        if indices.numel() == 0:
+            return
         assert degree <= self.max_sh_degree and degree >=0, f"Degree {degree} is out of bounds [0,{self.max_sh_degree}]"
         assert indices.max() < self.sh_degrees.shape[0], f"Index {indices.max()} is out of bounds [0,{self.sh_degrees.shape[0]-1}]"
-        self.sh_degrees[indices] = degree
+        new_degrees = self.sh_degrees.clone()
+        new_degrees[indices.long()] = degree
+        self._apply_new_sh_degrees(new_degrees)
 
     def set_random_sh_degrees(self):
         n_points = self.sh_degrees.shape[0]
-        random_degrees = torch.randint(0, self.max_sh_degree + 1, (n_points,), device="cuda", dtype=torch.int64)
-        self.sh_degrees = random_degrees
+        random_degrees = torch.randint(0, self.max_sh_degree + 1, (n_points,), device=self.sh_degrees.device, dtype=torch.int64)
+        self._apply_new_sh_degrees(random_degrees)
 
     def get_sh_degree_distribution(self):
         unique, counts = torch.unique(self.sh_degrees, return_counts=True)
@@ -557,10 +729,18 @@ class GaussianModel:
     def randomly_increase_sh_degrees_by_one(self, fraction):
         n_points = self.sh_degrees.shape[0]
         n_increase = int(n_points * fraction)
-        all_indices = torch.arange(n_points, device="cuda")
+        if n_increase == 0:
+            print("Random increase skipped because no Gaussians were selected.")
+            return
+        all_indices = torch.arange(n_points, device=self.sh_degrees.device)
         selected_indices = all_indices[torch.randperm(n_points)[:n_increase]]
         valid = selected_indices[self.sh_degrees[selected_indices] < self.max_sh_degree]
-        self.sh_degrees[valid] += 1
+        if valid.numel() == 0:
+            print("Random increase requested but no Gaussians can be upgraded.")
+            return
+        new_degrees = self.sh_degrees.clone()
+        new_degrees[valid] += 1
+        self._apply_new_sh_degrees(new_degrees)
 
         updated_percentage = valid.numel() / n_increase * 100.0
         print(f"Randomly increased SH degree for {valid.numel()} Gaussians ({updated_percentage:.2f}%), given was {fraction*100:.2f}%")
@@ -607,59 +787,39 @@ class GaussianModel:
         color_grads_rest = (self.accum_color_grads_rest / (self.color_denom + 1e-15))
         return color_grads_dc, color_grads_rest, ratios
 
-    def get_colorized_copy(self, get_color_fun):
-        clone = GaussianModel(self.max_sh_degree)
-        with torch.no_grad():
-            # --- Basisdaten kopieren ---
-            clone._xyz = self._xyz.clone()
-            clone._scaling = self._scaling.clone()
-            clone._rotation = self._rotation.clone()
-            clone._opacity = self._opacity.clone()
-            clone.sh_degrees = self.sh_degrees.clone()
-            # --- Farben als RGB holen ---
-            rgb_np = get_color_fun(self)     # (P,3) oder (P,4)
-            rgb_np = rgb_np[:, :3]
-            rgb = torch.tensor(rgb_np, device="cuda", dtype=torch.float32) / 255.0
-            P = self.get_xyz.shape[0]
-            # 1) DC-Features korrekt anlegen → (P, 1, 3)
-            clone._features_dc = torch.zeros((P, 1, 3), device="cuda")
-            clone._features_dc[:, 0, :] = rgb     # DC ist RGB
-            # 2) SH-Rest Features: (P, num_rest_coeffs, 3)
-            #max_coeffs = (self.max_sh_degree + 1) ** 2 - 1  # z. B. 15
-            clone._features_rest = torch.zeros((P, 0, 3), device="cuda")
-            # Wichtig: NICHT transponieren!
-            # Der Renderer erwartet: (P, COEFF, CHANNEL)
-        return clone
-
     def color_gradients_postfix(self):
         self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0],), device="cuda")
         self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0],), device="cuda")
         self.color_denom = 0
       
-    # Bennet New: visualize sh degrees    
-    def visualize_sh_degrees(self):
+    def get_sh_degree_colors(self):
         degree_colors = {
-            0: torch.tensor([0.5, 0.5, 0.5], device="cuda"),  # grau
-            1: torch.tensor([0.0, 1.0, 0.0], device="cuda"),  # grün
-            2: torch.tensor([0.0, 0.0, 1.0], device="cuda"),  # blau
-            3: torch.tensor([1.0, 0.0, 0.0], device="cuda"),  # rot      
-            }
+            0: torch.tensor([0.5, 0.5, 0.5], device="cuda"),
+            1: torch.tensor([0.0, 1.0, 0.0], device="cuda"),
+            2: torch.tensor([0.0, 0.0, 1.0], device="cuda"),
+            3: torch.tensor([1.0, 0.0, 0.0], device="cuda"),
+        }
         max_defined = max(degree_colors.keys())
         sh_deg = self.sh_degrees
+        colors = torch.zeros((sh_deg.shape[0], 3), device="cuda")
         with torch.no_grad():
             for d in torch.unique(sh_deg):
                 d_int = int(d.item())
                 color = degree_colors[d_int] if d_int in degree_colors else degree_colors[d_int % (max_defined + 1)]
                 mask = (sh_deg == d)
-                self._features_dc.data[mask, 0, :] = color
-                if self._features_rest is not None and self._features_rest.numel() > 0:
-                    self._features_rest.data[mask, :, :] = 0.0
+                colors[mask] = color
+        return colors.cpu().numpy()
     
     def increase_sh_degree_based_on_color_grads(self, ratio=0.05):
         quantile_value = torch.quantile(self.accum_color_grads_dc, 1-ratio)
         to_increase = (self.accum_color_grads_dc > quantile_value).squeeze()
         valid = to_increase & (self.sh_degrees < self.max_sh_degree)
-        self.sh_degrees[valid] += 1
+        if valid.sum().item() == 0:
+            print("No Gaussians qualified for SH degree increase.")
+            return
+        new_degrees = self.sh_degrees.clone()
+        new_degrees[valid] += 1
+        self._apply_new_sh_degrees(new_degrees)
         updated_percentage = valid.sum().item() / to_increase.sum().item() * 100.0 if to_increase.sum().item() > 0 else 0.0
         print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio}")
 
