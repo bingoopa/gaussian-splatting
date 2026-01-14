@@ -1,5 +1,5 @@
 import torch
-from sh_storage import SHStorage
+from sh_storage_new import SHStorage
 
 def test_adaptive_sh():
     N = 4

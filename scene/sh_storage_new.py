@@ -12,7 +12,7 @@ class SHStorage(nn.Module):
     """
 
     def __init__(self, num_gaussians, init_deg=0,
-                 max_degree=3, dtype = torch.float32, device="cpu"): # CPU zum Testen ohne VM
+                 max_degree=3, dtype = torch.float32, device=None): # CPU zum Testen ohne VM
         super().__init__()
         if device is None:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -65,7 +65,7 @@ class SHStorage(nn.Module):
     def _segment_indices(self, offsets: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
         """
         Given per-gaussian offsets and counts, return the flat indices that cover
-        all corresponding coefficient segments consecutively.
+        all corresponding coefficient segments
         """
         if counts.numel() == 0:
             return torch.zeros((0,), dtype=torch.long, device=self.device)
@@ -96,79 +96,60 @@ class SHStorage(nn.Module):
             return torch.zeros((0, 3), device=self.device, dtype=self.sh_coeffs_flat.dtype)
         return self.sh_coeffs_flat[idx]
 
+    
+    
     def _repack_all(
         self,
         new_degrees: torch.Tensor,
     ):
         """
-        Vollständiges Repacking aller Gaussians in einen neuen flachen Puffer.
-
-        new_degrees: [N] int32, neue SH-Grade (inkl. nicht veränderter).
-        (Einfach, aber O(T) – dafür extrem robust und gut nachvollziehbar.)
+        Repacking aller Gaussians ohne for-Schleife.
         """
+        
+        new_counts = (new_degrees + 1) ** 2
+        new_offsets = torch.cumsum(new_counts, dim=0) - new_counts
+        total_new_coeffs = int(new_counts.sum().item())
+        new_coeffs_flat = torch.zeros((total_new_coeffs, 3), device=self.device, dtype=self.sh_coeffs_flat.dtype)
 
-        device = self.device
-        N = self.num_gauss
+        # old indices (positions in the old flat array) for all existing coeffs
+        #idx = self._segment_indices(self.gauss_offsets, self.num_coeffs_per_gauss)
+        idx = torch.arange(self.sh_coeffs_flat.shape[0], device=self.device)
 
-        new_degrees = new_degrees.to(device=device, dtype=torch.int32)
-        new_num_coeff = (new_degrees + 1) ** 2  # dim N
+        # target positions in the new flat array for each old block entry
+        new_idx = self._segment_indices(new_offsets, self.num_coeffs_per_gauss)
 
-        # alter Zustand merken
-        old_flat = self.sh_coeffs_flat.data.clone()
-        old_offsets = self.gauss_offsets.clone()
-        old_num_coeffs_per_gauss = self.num_coeffs_per_gauss.clone()
-        total_old_coeffs = int(old_flat.shape[0])
+        # place old coeffs into new flat buffer
+        if idx.numel() > 0:
+            new_coeffs_flat[new_idx] = self.sh_coeffs_flat[idx]
 
-        # neuen Puffer anlegen
-        total_new_coeffs = int(new_num_coeff.sum().item())
-        new_flat = torch.zeros(
-            (total_new_coeffs, 3),
-            device=device,
-            dtype=self.sh_coeffs_flat.dtype,
-        )
+        # Build explicit mapping old_index -> new_index (length = total_old_coeffs)
+        total_old_coeffs = int(self.sh_coeffs_flat.shape[0])
+        if total_old_coeffs > 0:
+            mapping = torch.empty((total_old_coeffs,), dtype=torch.long, device=self.device)
+            # idx contains positions in old flat corresponding to each entry of new_idx
+            # so mapping[old_pos] = new_pos
+            mapping[idx] = new_idx
+        else:
+            mapping = torch.empty((0,), dtype=torch.long, device=self.device)
 
-        new_offsets = torch.empty_like(self.gauss_offsets)
-        mapping = torch.empty(
-            total_old_coeffs, dtype=torch.long, device=device
-        ) if total_old_coeffs > 0 else torch.empty(0, dtype=torch.long, device=device)
+        # install new state
+        self.sh_coeffs_flat = nn.Parameter(new_coeffs_flat)
+        self.gauss_offsets = new_offsets.to(torch.int32)
+        self.num_coeffs_per_gauss = new_counts.to(torch.int32)
+        self.sh_degrees = new_degrees.to(torch.int32)
+        self.num_gauss = int(new_degrees.shape[0])
+        self.num_gaussians = int(new_degrees.shape[0])
 
-        # Alle Gaussians einmal in den neuen Puffer kopieren
-        cursor = 0
-        for i in range(N):
-            old_start = int(old_offsets[i].item())
-            old_count = int(old_num_coeffs_per_gauss[i].item())
-            new_count = int(new_num_coeff[i].item())
-
-            new_offsets[i] = cursor
-
-            if old_count > 0:
-                new_flat[cursor : cursor + old_count] = old_flat[
-                    old_start : old_start + old_count
-                ]
-                if total_old_coeffs > 0:
-                    mapping[old_start : old_start + old_count] = (
-                        torch.arange(old_count, device=device, dtype=torch.long) + cursor
-                    )
-            # zusätzliche Koeffs (falls degree erhöht) bleiben 0-init
-            cursor += new_count
-
-        # in Module-State übernehmen
-        self.sh_coeffs_flat = nn.Parameter(new_flat)
-        self.gauss_offsets = new_offsets
-        self.num_coeffs_per_gauss = new_num_coeff
-        self.sh_degrees = new_degrees
-        self.num_gauss = N
-        self.num_gaussians = N
         return mapping
 
     def _extend_storage(self, new_degrees: torch.Tensor, new_coeffs: torch.Tensor):
         """
-        Fügt neue Gaussians zum Storage hinzu.
+        Fügt neue gaussians zum Storage hinzu
         
         Parameters:
-            new_degrees: Tensor [M], dtype int32 – die Degrees der neuen Gaussians
-            new_coeffs:  Tensor [sum((deg+1)^2), 3] – die SH-Koeffizienten aller neuen Gaussians
-                        konkatenierte Segmente in der Reihenfolge der neuen Gaussians.
+            new_degrees: Tensor [M], die sh degrees der neuen gaussians
+            new_coeffs:  Tensor [sum((deg+1)^2), 3] die SH-Koeffizienten aller neuen gaussians
+                        
         """
         if new_degrees.numel() == 0:
             return
@@ -254,7 +235,7 @@ class SHStorage(nn.Module):
         """
         Erhöht den SH-degree ausgewählter Gaussians.
 
-        gauss_ids: 1D-Long/Int-Tensor mit Gaussian-Indizes.
+        gauss_ids: Gaussian-Indizes.
         step:      wie viele L-Levels höher (typisch 1).
         hard_max_degree: optionaler Cap, damit man nicht über L_max hinausgeht.
         """

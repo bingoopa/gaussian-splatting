@@ -49,10 +49,11 @@ class Tee(object):
         self.stream.flush()
         self.file.flush()
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False, visualize_gradients = False, visualize_gradients_iters = [0] ,adaptive_sh = False):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, use_gui = False, sh_percentage=[0, 0], color_grad_stats=False, need_color_grads=False, visualize_degrees = False, visualize_gradients = False, visualize_gradients_iters = [0] ,adaptive_sh = False, psnr_ssim_iterations=[], lpips_iterations=[]):
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
+    print("psnr_ssim_iterations={}".format(psnr_ssim_iterations))
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -68,6 +69,34 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     # Compute color gradients if needed (explicitly requested or for adaptive SH)
     need_color_grads = need_color_grads or adaptive_sh
+
+    # New: parameters for adaptive SH increase
+    first_phase_start = 2000 # standard: 5000
+    second_phase_start = 6000 # standard: 10000
+    third_phase_start = 12000 # standard: 20000
+    third_phase_end = opt.iterations - 1 # standard: opt.iterations - 1
+    average_gradients_over = 100 
+    first_phase_ratio = 0.01 # standard: 0.005
+    second_phase_ratio = 0.015 # standard: 0.01
+    third_phase_ratio = 0.005 # standard: 0.002
+    first_phase_frequency = 250 # standard: 500
+    second_phase_frequency = 250 # standard: 500
+    third_phase_frequency = 1500 # standard: 1000
+
+    '''
+    schedule 2:
+    first_phase_start = 2000 # standard: 5000
+    second_phase_start = 6000 # standard: 10000
+    third_phase_start = 12000 # standard: 20000
+    third_phase_end = opt.iterations - 1 # standard: opt.iterations - 1
+    average_gradients_over = 100 
+    first_phase_ratio = 0.01 # standard: 0.005
+    second_phase_ratio = 0.015 # standard: 0.01
+    third_phase_ratio = 0.005 # standard: 0.002
+    first_phase_frequency = 250 # standard: 500
+    second_phase_frequency = 250 # standard: 500
+    third_phase_frequency = 1500 # standard: 1000
+    '''
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -141,12 +170,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), psnr_ssim_iterations, lpips_iterations)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
             # New: compute color gradient stats/ adapt SH degrees
+            """
             if color_grad_stats or need_color_grads:
                 color_grad_interval = 1000 # only works properly if color_grad_interval > 50, 
                 # We average of the last 50 iters before densification -> we want to avoid effects of densification on the stats
@@ -155,11 +185,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if color_grad_stats and (iteration % color_grad_interval == 0):
                     # Compute color gradient stats, in the current configuration at iterations 500, 5500, 10500, ...
                     gaussians.getColorGradStats(iteration)
-                if adaptive_sh and (iteration % color_grad_interval == 0):
+                if adaptive_sh and (iteration % color_grad_interval == 0) and iteration >= 5000 and iteration <= opt.iterations - 10000:
                     # Update SH degrees based on accumulated color gradients
                     gaussians.increase_sh_degree_based_on_color_grads()
                     gaussians.get_sh_degree_distribution()
-        
+            """
+
+            # New: Aggregate color gradients at any iteration (below they are reset after every average_gradients_over iters)
+            if need_color_grads: #and iteration >= first_phase_start - average_gradients_over:
+                gaussians.cumulate_color_gradients()
+
+            
+            # New scheduling of SH degree increase based on color gradients
+            if iteration >= first_phase_start and iteration < second_phase_start:
+                if (iteration - first_phase_start) % first_phase_frequency == 0:
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio, maximum_degree=1)
+                    gaussians.get_sh_degree_distribution()
+            elif iteration >= second_phase_start and iteration < third_phase_start:
+                if (iteration - second_phase_start) % second_phase_frequency == 0:
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio)
+                    gaussians.get_sh_degree_distribution()
+            elif iteration >= third_phase_start and iteration <= third_phase_end:
+                if (iteration - third_phase_start) % third_phase_frequency == 0:
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=third_phase_ratio)
+                    gaussians.get_sh_degree_distribution()
+            
+
             # ------------------------------
             # Save color-gradient visualization at specific iterations
             # ------------------------------
@@ -181,7 +232,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.reset_opacity()
             
             # New: reset color_gradient accumulator
-            if (color_grad_stats or need_color_grads) and iteration % color_grad_interval == opt.densify_from_iter:
+            #if (color_grad_stats or need_color_grads) and iteration % color_grad_interval == opt.densify_from_iter:
+                #gaussians.color_gradients_postfix()
+            
+            # New: reset color gradient accumulators after average_gradients_over iterations
+            if need_color_grads and iteration % average_gradients_over == 0:
                 gaussians.color_gradients_postfix()
 
             # Optimizer step
@@ -239,16 +294,21 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, psnr_ssim_iterations, lpips_iterations):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
+    compute_psnr_ssim = (iteration in psnr_ssim_iterations)
+    compute_lpips = (iteration in lpips_iterations)
+
     # Report test and samples of training set
-    if (iteration + 1) % testing_iterations[0] == 0:
-        lpips = LPIPS(net_type='vgg').to("cuda")
-        torch.cuda.empty_cache()
+    if compute_lpips or compute_psnr_ssim: #(iteration + 1) % testing_iterations[0] == 0:
+        #print("Evaluating lpips or psnr/ssim at iteration {}".format(iteration))
+        if compute_lpips:
+            lpips = LPIPS(net_type='vgg').to("cuda")
+            torch.cuda.empty_cache()
         validation_configs = (
             {'name': 'test', 'cameras' : scene.getTestCameras()},
             # {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]},
@@ -272,20 +332,29 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                         # if iteration == testing_iterations[0]:
                         #     tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
 
-                    psnr_val = psnr(image, gt_image).mean()
-                    ssim_val = ssim(image, gt_image)
-                    lpips_val = lpips(image, gt_image)
+                    if compute_psnr_ssim:
+                        psnr_val = psnr(image, gt_image).mean()
+                        ssim_val = ssim(image, gt_image)
+                    if compute_lpips:
+                        lpips_val = lpips(image, gt_image)
 
                     l1_test += l1_loss(image, gt_image).mean().double()
                     # psnr_test += psnr(image, gt_image).mean().double()
-                    psnr_test += psnr_val.item()
-                    ssim_test += ssim_val.item()
-                    lpips_test += lpips_val.item()
+                    if compute_psnr_ssim:
+                        psnr_test += psnr_val.item()
+                        ssim_test += ssim_val.item()
+                    if compute_lpips:
+                        lpips_test += lpips_val.item()
                 psnr_test /= len(config['cameras'])
                 ssim_test /= len(config['cameras'])
                 lpips_test /= len(config['cameras'])
                 l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+
+                with open("test_metrics_adaptive_schedule_2.csv", "a") as f:
+                    f.write(f"{iteration},{psnr_test},{ssim_test},{lpips_test}\n")
+
+
                 if tb_writer:
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
@@ -442,6 +511,11 @@ if __name__ == "__main__":
     parser.add_argument("--visualize_gradients_iters",nargs="+",type=int,default=[],help="Iterations during training where color-gradient visualization should be saved.")
     # New argument um adaptive sh-degrees zu aktivieren basierend auf color gradients
     parser.add_argument("--adaptive_sh", action="store_true", default=False, help="Use adaptive SH degrees based on color gradients")
+    # New testing iterations for PSNR/SSIM:
+    parser.add_argument("--psnr_ssim_iterations", nargs="+", type=int, default=[], help="Iterations during training where PSNR/SSIM should be computed.")
+    # New testing iterations for LPIPS:
+    parser.add_argument("--lpips_iterations", nargs="+", type=int, default=[], help="Iterations during training where LPIPS should be computed.")
+    
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -455,7 +529,7 @@ if __name__ == "__main__":
         print(f"Starting GUI server on {args.ip}:{args.port}")
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees, args.visualize_gradients, args.visualize_gradients_iters, args.adaptive_sh)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.use_gui, args.sh_percentage, args.color_grad_stats, args.need_color_grads, args.visualize_degrees, args.visualize_gradients, args.visualize_gradients_iters, args.adaptive_sh, args.psnr_ssim_iterations, args.lpips_iterations)
 
     # All done
     print("\nTraining complete.")

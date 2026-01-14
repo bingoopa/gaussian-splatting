@@ -11,6 +11,7 @@
 
 import torch
 import numpy as np
+import math
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
 from torch import nn
 import os
@@ -25,7 +26,7 @@ try:
 except ImportError:
     pd = None
 # Neue SH Speicherung
-from .sh_storage import SHStorage
+from .sh_storage_new import SHStorage
 
 class GaussianModel:
 
@@ -64,6 +65,9 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
+        # New
+        
+
         if pd is not None:
             self.df = pd.DataFrame(columns=['iteration', 'grads_dc', 'grads_rest', 'grads_ratio', 'sh_degrees'])
         else:
@@ -73,6 +77,9 @@ class GaussianModel:
         self.sh_storage = None
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.sh_degrees = torch.empty(0, dtype=torch.int64, device=device)
+
+        # per-gaussian seen counts for color grad normalization
+        #self.color_seen_counts = torch.empty(0, dtype=torch.float32, device=device)
 
 
         self.setup_functions()
@@ -369,45 +376,114 @@ class GaussianModel:
             l.append('rot_{}'.format(i))
         return l
 
-    def save_ply(self, path):
-        mkdir_p(os.path.dirname(path))
+    
+    def save_ply(self, path, roundtrip_check: bool = False):
+            # per vertex version
+            # Save scene to a PLY using compact SH storage.
+        
 
-        xyz = self._xyz.detach().cpu().numpy()
-        normals = np.zeros_like(xyz)
-        dense = self.sh_storage.build_dense_sh(self.max_sh_degree)
-        f_dc = dense[:, :, :1].transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        rest = dense[:, :, 1:]
-        if rest.numel() > 0:
-            f_rest = rest.transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
-        else:
-            f_rest = np.zeros((xyz.shape[0], 0), dtype=np.float32)
-        opacities = self._opacity.detach().cpu().numpy()
-        scale = self._scaling.detach().cpu().numpy()
-        rotation = self._rotation.detach().cpu().numpy()
-        # New
-        #sh_deg = self.sh_degrees.detach().cpu().numpy().astype(np.int32) if hasattr(self, 'sh_degrees') else np.full((xyz.shape[0],), self.max_sh_degree, dtype=np.int32)
-        #BENNET: Hier änderungen vorgenommen (Copilot: Convert to i4 for PLY, keep internal dtype int64)
-        sh_deg = (self.sh_degrees.detach().cpu().numpy().astype(np.int32)
-                  if hasattr(self, 'sh_degrees') and self.sh_degrees.numel() == xyz.shape[0]
-                  else np.full((xyz.shape[0],), self.max_sh_degree, dtype=np.int32))
-        sh_deg = sh_deg.reshape(-1, 1)
+            # The PLY will contain two elements:
+            # - 'vertex' with per-vertex attributes and integer metadata fields:
+            # sh_degrees (i4), sh_offset (i4), sh_num_coeffs (i4)
+            # - 'sh_coeffs' with all SH rows packed as (r,g,b) floats
+            
+            mkdir_p(os.path.dirname(path))
 
-        dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
-        # New
-        dtype_full.append(('sh_degrees', 'i4'))
+            xyz = self._xyz.detach().cpu().numpy()
+            normals = np.zeros_like(xyz)
 
-        elements = np.empty(xyz.shape[0], dtype=dtype_full)
-        attributes = np.concatenate((xyz, normals, f_dc, f_rest, opacities, scale, rotation, sh_deg), axis=1) # New: sh_deg
-        elements[:] = list(map(tuple, attributes))
-        el = PlyElement.describe(elements, 'vertex')
-        PlyData([el]).write(path)
+            opacities = self._opacity.detach().cpu().numpy()
+            scale = self._scaling.detach().cpu().numpy()
+            rotation = self._rotation.detach().cpu().numpy()
+
+            storage = self.sh_storage
+            if storage is None:
+                sh_coeffs_np = np.zeros((0, 3), dtype=np.float32)
+                gauss_offsets_np = np.zeros((xyz.shape[0],), dtype=np.int32)
+                num_coeffs_np = np.zeros((xyz.shape[0],), dtype=np.int32)
+                sh_degrees_np = np.full((xyz.shape[0],), int(self.max_sh_degree), dtype=np.int32)
+            else:
+                sh_coeffs_np = storage.sh_coeffs_flat.detach().cpu().numpy().astype(np.float32)
+                gauss_offsets_np = storage.gauss_offsets.detach().cpu().numpy().astype(np.int32)
+                num_coeffs_np = storage.num_coeffs_per_gauss.detach().cpu().numpy().astype(np.int32)
+                if hasattr(self, 'sh_degrees') and self.sh_degrees.numel() == xyz.shape[0]:
+                    sh_degrees_np = self.sh_degrees.detach().cpu().numpy().astype(np.int32)
+                else:
+                    sh_degrees_np = np.full((xyz.shape[0],), int(self.max_sh_degree), dtype=np.int32)
+
+            # Build vertex dtype and populate rows
+            vertex_dtype = [
+                ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+                ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
+                ('opacity', 'f4')
+            ]
+            for i in range(self._scaling.shape[1]):
+                vertex_dtype.append((f'scale_{i}', 'f4'))
+            for i in range(self._rotation.shape[1]):
+                vertex_dtype.append((f'rot_{i}', 'f4'))
+            vertex_dtype.extend([('sh_degrees', 'i4'), ('sh_offset', 'i4'), ('sh_num_coeffs', 'i4')])
+
+            vertices = np.empty(xyz.shape[0], dtype=vertex_dtype)
+            for i in range(xyz.shape[0]):
+                row = []
+                row.extend([float(v) for v in xyz[i]])
+                row.extend([float(v) for v in normals[i]])
+                row.append(float(opacities[i]))
+                row.extend([float(v) for v in scale[i]])
+                row.extend([float(v) for v in rotation[i]])
+                row.append(int(sh_degrees_np[i]))
+                row.append(int(gauss_offsets_np[i]))
+                row.append(int(num_coeffs_np[i]))
+                vertices[i] = tuple(row)
+
+            # SH coeffs element
+            sh_dtype = [('r', 'f4'), ('g', 'f4'), ('b', 'f4')]
+            sh_elements = np.empty(sh_coeffs_np.shape[0], dtype=sh_dtype)
+            if sh_coeffs_np.shape[0] > 0:
+                sh_elements['r'] = sh_coeffs_np[:, 0]
+                sh_elements['g'] = sh_coeffs_np[:, 1]
+                sh_elements['b'] = sh_coeffs_np[:, 2]
+
+            el_vert = PlyElement.describe(vertices, 'vertex')
+            el_sh = PlyElement.describe(sh_elements, 'sh_coeffs')
+            PlyData([el_vert, el_sh]).write(path)
+
+            if roundtrip_check:
+                try:
+                    gm2 = GaussianModel(self.max_sh_degree)
+                    gm2.load_ply(path)
+                    orig_state = self.sh_storage.serialize() if self.sh_storage is not None else None
+                    new_state = gm2.sh_storage.serialize() if gm2.sh_storage is not None else None
+                    if (orig_state is None) != (new_state is None):
+                        raise RuntimeError("PLY roundtrip failed: missing sh_storage after load")
+                    if orig_state is not None:
+                        orig_counts = orig_state["num_coeffs_per_gauss"].cpu().numpy()
+                        new_counts = new_state["num_coeffs_per_gauss"].cpu().numpy()
+                        if orig_counts.shape != new_counts.shape or not np.array_equal(orig_counts, new_counts):
+                            raise RuntimeError("PLY roundtrip failed: coeff counts differ")
+                        orig_degs = orig_state["sh_degrees"].cpu().numpy()
+                        new_degs = new_state["sh_degrees"].cpu().numpy()
+                        if orig_degs.shape != new_degs.shape or not np.array_equal(orig_degs, new_degs):
+                            raise RuntimeError("PLY roundtrip failed: sh_degrees differ")
+                        orig_coeffs = orig_state["sh_coeffs_flat"].cpu().numpy()
+                        new_coeffs = new_state["sh_coeffs_flat"].cpu().numpy()
+                        if orig_coeffs.shape != new_coeffs.shape or not np.allclose(orig_coeffs, new_coeffs, atol=1e-6):
+                            raise RuntimeError("PLY roundtrip failed: sh_coeffs_flat differ (values or shape)")
+                    print(f"PLY roundtrip check OK: {path}")
+                except Exception as e:
+                    print(f"PLY roundtrip check failed: {e}")
+                    raise
+                    
+    
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+    
     def load_ply(self, path):
+        # per vertex version
         plydata = PlyData.read(path)
 
         xyz = np.stack((np.asarray(plydata.elements[0]["x"]),
@@ -415,19 +491,9 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
 
-        features_dc = np.zeros((xyz.shape[0], 3, 1))
-        features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
-        features_dc[:, 1, 0] = np.asarray(plydata.elements[0]["f_dc_1"])
-        features_dc[:, 2, 0] = np.asarray(plydata.elements[0]["f_dc_2"])
-
-        extra_f_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("f_rest_")]
-        extra_f_names = sorted(extra_f_names, key = lambda x: int(x.split('_')[-1]))
-        assert len(extra_f_names)==3*(self.max_sh_degree + 1) ** 2 - 3
-        features_extra = np.zeros((xyz.shape[0], len(extra_f_names)))
-        for idx, attr_name in enumerate(extra_f_names):
-            features_extra[:, idx] = np.asarray(plydata.elements[0][attr_name])
-        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
-        features_extra = features_extra.reshape((features_extra.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+        # Compact format: SH rows are stored separately in 'sh_coeffs' element
+        # and per-vertex metadata ('sh_offset', 'sh_num_coeffs', optional 'sh_degrees')
+        # We don't expect legacy f_dc_/f_rest_ fields in the compact format.
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
         scale_names = sorted(scale_names, key = lambda x: int(x.split('_')[-1]))
@@ -441,29 +507,189 @@ class GaussianModel:
         for idx, attr_name in enumerate(rot_names):
             rots[:, idx] = np.asarray(plydata.elements[0][attr_name])
 
-        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
-        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
+        # Choose runtime device (avoid hardcoded 'cuda')
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device=device).requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device=device).requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device=device).requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device=device).requires_grad_(True))
 
-        # New
+        # Expect the compact SH storage format (written by save_ply)
+        vertex_props = [p.name for p in plydata.elements[0].properties]
+        if not ('sh_offset' in vertex_props and 'sh_num_coeffs' in vertex_props):
+            raise RuntimeError("PLY does not contain compact SH metadata fields ('sh_offset' and 'sh_num_coeffs').")
+
+        # Read per-vertex metadata
+        sh_offsets_np = np.asarray(plydata.elements[0]['sh_offset']).astype(np.int64)
+        num_coeffs_np = np.asarray(plydata.elements[0]['sh_num_coeffs']).astype(np.int64)
+        if 'sh_degrees' in vertex_props:
+            sh_degrees_np = np.asarray(plydata.elements[0]['sh_degrees']).astype(np.int64)
+        else:
+            sh_degrees_np = np.array([int(math.isqrt(int(n)) - 1) for n in num_coeffs_np], dtype=np.int64)
+
+        # Read packed SH coeffs element
         try:
-            sh_deg = np.asarray(plydata.elements[0]["sh_degrees"]).astype(np.int64)
-            sh_degrees = torch.tensor(sh_deg, dtype=torch.int64, device="cuda")
-        except Exception:
-            # no per-vertex sh_degree stored: enable all coefficients
-            P = xyz.shape[0]
-            sh_degrees = torch.full((P,), self.max_sh_degree, dtype=torch.int64, device="cuda")
+            sh_el = next(e for e in plydata.elements if e.name == 'sh_coeffs')
+        except StopIteration:
+            raise RuntimeError("PLY missing 'sh_coeffs' element required for compact format.")
 
-        dense = torch.tensor(
-            np.concatenate((features_dc, features_extra), axis=2),
-            dtype=torch.float,
-            device="cuda",
-        )
-        self.sh_storage = self._build_storage_from_dense(dense, sh_degrees)
+        sh_r = np.asarray(sh_el['r'])
+        sh_g = np.asarray(sh_el['g'])
+        sh_b = np.asarray(sh_el['b'])
+        sh_coeffs_np = np.stack((sh_r, sh_g, sh_b), axis=1).astype(np.float32)
+
+        # Build serialized state and load via SHStorage.from_serialized onto chosen device
+        sh_state = {
+            'sh_coeffs_flat': torch.tensor(sh_coeffs_np, dtype=torch.float32, device=device),
+            'gauss_offsets': torch.tensor(sh_offsets_np, dtype=torch.int32, device=device),
+            'num_coeffs_per_gauss': torch.tensor(num_coeffs_np, dtype=torch.int32, device=device),
+            'sh_degrees': torch.tensor(sh_degrees_np, dtype=torch.int32, device=device),
+            'max_degree': int(int(sh_degrees_np.max())) if sh_degrees_np.size > 0 else 0,
+        }
+        self.sh_storage = SHStorage.from_serialized(sh_state, device=device)
         self._sync_sh_degrees_from_storage()
         self.active_sh_degree = int(self.sh_degrees.max().item()) if self.sh_degrees.numel() > 0 else 0
 
+
+    """
+    def save_ply(self, path, roundtrip_check: bool = False):
+        #Save compact PLY: vertex attributes in 'vertex' element and
+        #all SH coefficients as a separate 'sh_coeff' element, plus per-gaussian
+        #metadata in 'gaussian_meta'. This avoids per-vertex variable fields.
+        
+        mkdir_p(os.path.dirname(path))
+
+        xyz = self._xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        opacities = self._opacity.detach().cpu().numpy()
+        scale = self._scaling.detach().cpu().numpy()
+        rotation = self._rotation.detach().cpu().numpy()
+
+        # Packed SH coefficients and per-gaussian metadata
+        sh_coeffs = self.sh_storage.sh_coeffs_flat.detach().cpu().numpy().astype(np.float32)
+        offsets = self.sh_storage.gauss_offsets.detach().cpu().numpy().astype(np.int32)
+        counts = self.sh_storage.num_coeffs_per_gauss.detach().cpu().numpy().astype(np.int32)
+        degrees = self.sh_storage.sh_degrees.detach().cpu().numpy().astype(np.int32)
+
+        # Vertex dtype (no per-vertex SH fields)
+        dtype_vert = [
+            ('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
+            ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
+            ('opacity', 'f4')
+        ]
+        for i in range(scale.shape[1]):
+            dtype_vert.append((f'scale_{i}', 'f4'))
+        for i in range(rotation.shape[1]):
+            dtype_vert.append((f'rot_{i}', 'f4'))
+
+        attributes = np.concatenate((xyz, normals, opacities, scale, rotation), axis=1)
+        vertex_el = np.empty(xyz.shape[0], dtype=dtype_vert)
+        vertex_el[:] = list(map(tuple, attributes))
+        vertex = PlyElement.describe(vertex_el, 'vertex')
+
+        # SH coefficients element: each row is one coeff [r,g,b]
+        sh_dtype = [('r', 'f4'), ('g', 'f4'), ('b', 'f4')]
+        sh_el = np.empty(sh_coeffs.shape[0], dtype=sh_dtype)
+        sh_el['r'] = sh_coeffs[:, 0]
+        sh_el['g'] = sh_coeffs[:, 1]
+        sh_el['b'] = sh_coeffs[:, 2]
+        sh_element = PlyElement.describe(sh_el, 'sh_coeff')
+
+        # Meta element: per-gaussian offset, count, degree
+        meta_dtype = [('offset', 'i4'), ('count', 'i4'), ('degree', 'i4')]
+        meta_el = np.empty(offsets.shape[0], dtype=meta_dtype)
+        meta_el['offset'] = offsets
+        meta_el['count'] = counts
+        meta_el['degree'] = degrees
+        meta_element = PlyElement.describe(meta_el, 'gaussian_meta')
+
+        PlyData([vertex, sh_element, meta_element]).write(path)
+
+        if roundtrip_check:
+            try:
+                gm2 = GaussianModel(self.max_sh_degree)
+                gm2.load_ply(path)
+                orig_state = self.sh_storage.serialize() if self.sh_storage is not None else None
+                new_state = gm2.sh_storage.serialize() if gm2.sh_storage is not None else None
+                if (orig_state is None) != (new_state is None):
+                    raise RuntimeError("PLY roundtrip failed: missing sh_storage after load")
+                if orig_state is not None:
+                    orig_counts = orig_state["num_coeffs_per_gauss"].cpu().numpy()
+                    new_counts = new_state["num_coeffs_per_gauss"].cpu().numpy()
+                    if orig_counts.shape != new_counts.shape or not np.array_equal(orig_counts, new_counts):
+                        raise RuntimeError("PLY roundtrip failed: coeff counts differ")
+                    orig_degs = orig_state["sh_degrees"].cpu().numpy()
+                    new_degs = new_state["sh_degrees"].cpu().numpy()
+                    if orig_degs.shape != new_degs.shape or not np.array_equal(orig_degs, new_degs):
+                        raise RuntimeError("PLY roundtrip failed: sh_degrees differ")
+                    orig_coeffs = orig_state["sh_coeffs_flat"].cpu().numpy()
+                    new_coeffs = new_state["sh_coeffs_flat"].cpu().numpy()
+                    if orig_coeffs.shape != new_coeffs.shape or not np.allclose(orig_coeffs, new_coeffs, atol=1e-6):
+                        raise RuntimeError("PLY roundtrip failed: sh_coeffs_flat differ (values or shape)")
+                print(f"PLY roundtrip check OK: {path}")
+            except Exception as e:
+                print(f"PLY roundtrip check failed: {e}")
+                raise
+    
+    def load_ply(self, path):
+        #Load compact PLY written by `save_compact_ply` and reconstruct
+        #`sh_storage` and vertex attributes.
+        
+        ply = PlyData.read(path)
+
+        v = ply['vertex'].data
+        xyz = np.vstack((v['x'], v['y'], v['z'])).T
+
+        # normals are not stored (zeros)
+        # read opacity if present
+        if 'opacity' in v.dtype.names:
+            opacities = np.asarray(v['opacity'])[..., np.newaxis]
+        else:
+            opacities = np.ones((xyz.shape[0], 1), dtype=np.float32)
+
+        # read scales and rotations if present
+        scale_names = [n for n in v.dtype.names if n.startswith('scale_')]
+        scale_names = sorted(scale_names, key=lambda x: int(x.split('_')[-1]))
+        scales = np.zeros((xyz.shape[0], len(scale_names)))
+        for idx, name in enumerate(scale_names):
+            scales[:, idx] = np.asarray(v[name])
+
+        rot_names = [n for n in v.dtype.names if n.startswith('rot_')]
+        rot_names = sorted(rot_names, key=lambda x: int(x.split('_')[-1]))
+        rots = np.zeros((xyz.shape[0], len(rot_names)))
+        for idx, name in enumerate(rot_names):
+            rots[:, idx] = np.asarray(v[name])
+
+        # read sh_coeff element
+        sh_el = ply['sh_coeff'].data
+        sh_coeffs = np.vstack((sh_el['r'], sh_el['g'], sh_el['b'])).T.astype(np.float32)
+
+        # read meta
+        meta = ply['gaussian_meta'].data
+        offsets = np.asarray(meta['offset']).astype(np.int32)
+        counts = np.asarray(meta['count']).astype(np.int32)
+        degrees = np.asarray(meta['degree']).astype(np.int32)
+
+        # assign tensors
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device=device).requires_grad_(True))
+        self._opacity = nn.Parameter(torch.tensor(opacities, dtype=torch.float, device=device).requires_grad_(True))
+        self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device=device).requires_grad_(True))
+        self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device=device).requires_grad_(True))
+
+        # rebuild storage
+        storage = SHStorage(num_gaussians=offsets.shape[0], init_deg=0, max_degree=self.max_sh_degree, device=device)
+        storage.sh_coeffs_flat = nn.Parameter(torch.tensor(sh_coeffs, dtype=torch.float32, device=device))
+        storage.gauss_offsets = torch.tensor(offsets, dtype=torch.int32, device=device)
+        storage.num_coeffs_per_gauss = torch.tensor(counts, dtype=torch.int32, device=device)
+        storage.sh_degrees = torch.tensor(degrees, dtype=torch.int32, device=device)
+        storage.num_gauss = offsets.shape[0]
+        storage.num_gaussians = offsets.shape[0]
+        self.sh_storage = storage
+        self._sync_sh_degrees_from_storage()
+        self.active_sh_degree = int(self.sh_degrees.max().item()) if self.sh_degrees.numel() > 0 else 0
+    """
+        
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -668,10 +894,11 @@ class GaussianModel:
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
     
-    # New
+    # New: Old cumulate_color_gradients which doesn't average over calls
+    """
     def cumulate_color_gradients(self): 
         if(self.color_denom == 0):
-            print("Initializing color gradient accumulation tensors...")
+            #print("Initializing color gradient accumulation tensors...")
             self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0],), device="cuda")
             self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0],), device = "cuda")
         if self.sh_storage.sh_coeffs_flat.grad is None:
@@ -698,6 +925,69 @@ class GaussianModel:
         self.accum_color_grads_dc += dc_accum
         self.accum_color_grads_rest += rest_accum
         self.color_denom += 1 
+    """
+
+    # New cumulate_color_gradients which averages over calls and tracks seen counts
+    def cumulate_color_gradients(self): 
+        if self.sh_storage is None:
+            return
+
+        # ensure accum buffers exist and have correct length N
+        counts = self.sh_storage.num_coeffs_per_gauss.to(device=self.sh_storage.sh_coeffs_flat.device, dtype=torch.long)
+        N = counts.shape[0]
+        device = self.sh_storage.sh_coeffs_flat.device
+
+        # If any of the accumulators do not match N, (re)initialize them to zeros of length N
+        if self.accum_color_grads_dc.numel() != N:
+            self.accum_color_grads_dc = torch.zeros((N,), device=device)
+        if self.accum_color_grads_rest.numel() != N:
+            self.accum_color_grads_rest = torch.zeros((N,), device=device)
+        #if self.color_seen_counts.numel() != N:
+            #self.color_seen_counts = torch.zeros((N,), device=device, dtype=torch.float32)
+        # ensure color_denom is defined
+        if not isinstance(self.color_denom, (int, float)):
+            self.color_denom = 0
+
+        if self.sh_storage.sh_coeffs_flat.grad is None:
+            return
+
+        grad = self.sh_storage.sh_coeffs_flat.grad
+        grad_norm = torch.norm(grad, dim=1)
+        total = int(counts.sum().item())
+        if total == 0:
+            return
+
+        gauss_ids = torch.repeat_interleave(torch.arange(N, device=device, dtype=torch.long), counts)
+        local_idx = torch.arange(total, device=device, dtype=torch.long) - torch.repeat_interleave(torch.cumsum(counts, dim=0) - counts, counts)
+
+        dc_mask = local_idx == 0
+        rest_mask = ~dc_mask
+
+        dc_accum = torch.zeros(N, device=device)
+        rest_accum = torch.zeros(N, device=device)
+        if dc_mask.any():
+            dc_accum.scatter_add_(0, gauss_ids[dc_mask], grad_norm[dc_mask])
+        if rest_mask.any():
+            rest_accum.scatter_add_(0, gauss_ids[rest_mask], grad_norm[rest_mask])
+
+        # increment per-gaussian accumulators
+        self.accum_color_grads_dc += dc_accum
+        self.accum_color_grads_rest += rest_accum
+
+        '''
+        # update per-gaussian seen counts: mark a gaussian as seen if any of its coeffs had a non-zero grad
+        seen_mask = grad_norm > 1e-12
+        if seen_mask.any():
+            seen_inc = torch.zeros(N, device=device, dtype=self.color_seen_counts.dtype)
+            # ones for the seen coeffs
+            one_vals = torch.ones((seen_mask.sum().item(),), device=device, dtype=self.color_seen_counts.dtype)
+            seen_inc.scatter_add_(0, gauss_ids[seen_mask], one_vals)
+            # clamp to at most 1 per gaussian per call
+            seen_inc = (seen_inc > 0).to(self.color_seen_counts.dtype)
+            self.color_seen_counts += seen_inc
+        '''
+        # keep a global counter for diagnostics
+        self.color_denom += 1
 
 
     # New methods for SH degree management
@@ -719,9 +1009,11 @@ class GaussianModel:
         self._apply_new_sh_degrees(random_degrees)
 
     def get_sh_degree_distribution(self):
+        total_points = self.sh_degrees.shape[0]
+        print(f"Total Gaussians: {total_points}")
         unique, counts = torch.unique(self.sh_degrees, return_counts=True)
         for u, c in zip(unique.cpu().numpy(), counts.cpu().numpy()):
-            print(f"SH degree {u}: {c} Gaussians")
+            print(f"SH degree {u}: {c/total_points*100:.2f}% Gaussians")
 
     def get_sh_degrees_by_indices(self, indices):
         return self.sh_degrees[indices]
@@ -790,6 +1082,7 @@ class GaussianModel:
     def color_gradients_postfix(self):
         self.accum_color_grads_dc = torch.zeros((self.get_xyz.shape[0],), device="cuda")
         self.accum_color_grads_rest = torch.zeros((self.get_xyz.shape[0],), device="cuda")
+        #self.color_seen_counts = torch.zeros((self.get_xyz.shape[0],), device="cuda", dtype=torch.float32)
         self.color_denom = 0
       
     def get_sh_degree_colors(self):
@@ -810,17 +1103,57 @@ class GaussianModel:
                 colors[mask] = color
         return colors.cpu().numpy()
     
-    def increase_sh_degree_based_on_color_grads(self, ratio=0.05):
+    # Old method
+    
+    def increase_sh_degree_based_on_color_grads(self, ratio=0.05, maximum_degree = 3):
+        valid_degree = self.sh_degrees < maximum_degree
         quantile_value = torch.quantile(self.accum_color_grads_dc, 1-ratio)
-        to_increase = (self.accum_color_grads_dc > quantile_value).squeeze()
-        valid = to_increase & (self.sh_degrees < self.max_sh_degree)
+        valid = (self.accum_color_grads_dc > quantile_value).squeeze()
+        valid = valid & valid_degree
+        #valid = to_increase & (self.sh_degrees < self.max_sh_degree)
         if valid.sum().item() == 0:
             print("No Gaussians qualified for SH degree increase.")
             return
         new_degrees = self.sh_degrees.clone()
         new_degrees[valid] += 1
         self._apply_new_sh_degrees(new_degrees)
-        updated_percentage = valid.sum().item() / to_increase.sum().item() * 100.0 if to_increase.sum().item() > 0 else 0.0
-        print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio}")
+        updated_percentage = valid.sum().item() / self.sh_degrees.shape[0] * 100.0
+        print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%) based on color gradients.")
+    
+    '''
+    # New method that uses averaged gradients and ratio of rest vs dc and seen counts
+    def increase_sh_degree_based_on_color_grads(self, ratio=0.05, maximum_degree=3):
+        # use normalized averages (per-gaussian) to avoid bias from visibility frequency
+        if self.color_seen_counts.numel() == 0 or self.color_seen_counts.sum() == 0:
+            print("No color gradient statistics collected yet.")
+            return
 
+        eps = 1e-6
+        dc_avg = self.accum_color_grads_dc / (self.color_seen_counts + eps)
+        rest_avg = self.accum_color_grads_rest / (self.color_seen_counts + eps)
+
+        # score: how large rest is relative to dc (higher => worth increasing degree)
+        score = dc_avg
+
+        # pick top fraction by score
+        quantile_value = torch.quantile(score, 1.0 - ratio)
+        to_increase = score > quantile_value
+        valid = to_increase & (self.sh_degrees < maximum_degree)
+        print(valid.sum().item(), "Gaussians will have their SH degree increased.")
+        if valid.sum().item() == 0:
+            print("No Gaussians qualified for SH degree increase.")
+            return
+
+        new_degrees = self.sh_degrees.clone()
+        new_degrees[valid] += 1
+        self._apply_new_sh_degrees(new_degrees)
+
+        updated_percentage = valid.sum().item() / max(1, to_increase.sum().item()) * 100.0
+        print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%), given ratio threshold was {ratio}")
+        # print variance of seen counts for diagnostics
+        seen_var = torch.var(self.color_seen_counts.float()).item()
+        print(f"Variance of color gradient seen counts: {seen_var:.6f}")
+        seen_avg = torch.mean(self.color_seen_counts.float()).item()
+        print(f"Average of color gradient seen counts: {seen_avg:.6f}")
+    '''
     
