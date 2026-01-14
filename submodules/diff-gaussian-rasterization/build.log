@@ -1,0 +1,141 @@
+running install
+/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/cmd.py:90: SetuptoolsDeprecationWarning: setup.py install is deprecated.
+!!
+
+        ********************************************************************************
+        Please avoid running ``setup.py`` directly.
+        Instead, use pypa/build, pypa/installer or other
+        standards-based tools.
+
+        This deprecation is overdue, please update your project and remove deprecated
+        calls to avoid build errors in the future.
+
+        See https://blog.ganssle.io/articles/2021/10/setup-py-deprecated.html for details.
+        ********************************************************************************
+
+!!
+  self.initialize_options()
+running build
+running build_py
+copying diff_gaussian_rasterization/__init__.py -> build/lib.linux-x86_64-cpython-310/diff_gaussian_rasterization
+running build_ext
+/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py:416: UserWarning: The detected CUDA version (12.4) has a minor version mismatch with the version that was used to compile PyTorch (12.1). Most likely this shouldn't be a problem.
+  warnings.warn(CUDA_MISMATCH_WARN.format(cuda_str_version, torch.version.cuda))
+/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py:426: UserWarning: There are no g++ version bounds defined for CUDA version 12.4
+  warnings.warn(f'There are no {compiler_name} version bounds defined for CUDA version {cuda_str_version}')
+building 'diff_gaussian_rasterization._C' extension
+/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py:1964: UserWarning: TORCH_CUDA_ARCH_LIST is not set, all archs for visible cards are included for compilation. 
+If this is not desired, please set os.environ['TORCH_CUDA_ARCH_LIST'].
+  warnings.warn(
+Emitting ninja build file /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/build.ninja...
+Compiling objects...
+Allowing ninja to set a default number of workers... (overridable by setting the environment variable MAX_JOBS=N)
+[1/4] /home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+FAILED: /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o 
+/home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/rasterizer_impl.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.cu:20:10: fatal error: cub/cub.cuh: No such file or directory
+   20 | #include <cub/cub.cuh>
+      |          ^~~~~~~~~~~~~
+compilation terminated.
+[2/4] /home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/rasterize_points.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+FAILED: /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o 
+/home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/rasterize_points.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/rasterize_points.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+In file included from /home/paulhoheisel/miniconda/envs/3dgs/include/cuda_bf16.h:3974,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/c10/util/BFloat16.h:14,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/c10/core/ScalarType.h:3,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/c10/core/Scalar.h:9,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/ATen/core/TensorBody.h:16,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/ATen/core/Tensor.h:3,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/ATen/Tensor.h:3,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/autograd/function_hook.h:3,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/autograd/cpp_hook.h:2,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/autograd/variable.h:6,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/autograd/autograd.h:3,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include/torch/autograd.h:3,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include/torch/all.h:7,
+                 from /home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/extension.h:5,
+                 from /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/rasterize_points.cu:13:
+/home/paulhoheisel/miniconda/envs/3dgs/include/cuda_bf16.hpp:80:10: fatal error: nv/target: No such file or directory
+   80 | #include <nv/target>
+      |          ^~~~~~~~~~~
+compilation terminated.
+[3/4] /home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/forward.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+FAILED: /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o 
+/home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/forward.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/forward.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+In file included from /home/paulhoheisel/miniconda/envs/3dgs/include/cooperative_groups.h:55,
+                 from /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/forward.cu:14:
+/home/paulhoheisel/miniconda/envs/3dgs/include/cooperative_groups/details/info.h:166:12: fatal error: cuda/std/type_traits: No such file or directory
+  166 | #  include <cuda/std/type_traits>
+      |            ^~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+[4/4] /home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/backward.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+FAILED: /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o 
+/home/paulhoheisel/miniconda/envs/3dgs/bin/nvcc --generate-dependencies-with-compile --dependency-output /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o.d -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/torch/csrc/api/include -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/TH -I/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/include/THC -I/home/paulhoheisel/miniconda/envs/3dgs/include -I/home/paulhoheisel/miniconda/envs/3dgs/include/python3.10 -c -c /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/backward.cu -o /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/build/temp.linux-x86_64-cpython-310/cuda_rasterizer/backward.o -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__ -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__ --expt-relaxed-constexpr --compiler-options ''"'"'-fPIC'"'"'' -I/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/third_party/glm/ -DTORCH_API_INCLUDE_EXTENSION_H '-DPYBIND11_COMPILER_TYPE="_gcc"' '-DPYBIND11_STDLIB="_libstdcpp"' '-DPYBIND11_BUILD_ABI="_cxxabi1011"' -DTORCH_EXTENSION_NAME=_C -D_GLIBCXX_USE_CXX11_ABI=0 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_89,code=sm_89 -std=c++17
+In file included from /home/paulhoheisel/miniconda/envs/3dgs/include/cooperative_groups.h:55,
+                 from /home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/cuda_rasterizer/backward.cu:14:
+/home/paulhoheisel/miniconda/envs/3dgs/include/cooperative_groups/details/info.h:166:12: fatal error: cuda/std/type_traits: No such file or directory
+  166 | #  include <cuda/std/type_traits>
+      |            ^~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+ninja: build stopped: subcommand failed.
+Traceback (most recent call last):
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py", line 2104, in _run_ninja_build
+    subprocess.run(
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/subprocess.py", line 526, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['ninja', '-v']' returned non-zero exit status 1.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/paulhoheisel/gaussian-splatting/submodules/diff-gaussian-rasterization/setup.py", line 17, in <module>
+    setup(
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/__init__.py", line 115, in setup
+    return distutils.core.setup(**attrs)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/core.py", line 186, in setup
+    return run_commands(dist)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/core.py", line 202, in run_commands
+    dist.run_commands()
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1002, in run_commands
+    self.run_command(cmd)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/dist.py", line 1102, in run_command
+    super().run_command(command)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1021, in run_command
+    cmd_obj.run()
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/command/install.py", line 689, in run
+    self.run_command('build')
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/cmd.py", line 357, in run_command
+    self.distribution.run_command(command)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/dist.py", line 1102, in run_command
+    super().run_command(command)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1021, in run_command
+    cmd_obj.run()
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/command/build.py", line 135, in run
+    self.run_command(cmd_name)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/cmd.py", line 357, in run_command
+    self.distribution.run_command(command)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/dist.py", line 1102, in run_command
+    super().run_command(command)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/dist.py", line 1021, in run_command
+    cmd_obj.run()
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/command/build_ext.py", line 96, in run
+    _build_ext.run(self)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/command/build_ext.py", line 368, in run
+    self.build_extensions()
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py", line 868, in build_extensions
+    build_ext.build_extensions(self)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/command/build_ext.py", line 484, in build_extensions
+    self._build_extensions_serial()
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/command/build_ext.py", line 510, in _build_extensions_serial
+    self.build_extension(ext)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/command/build_ext.py", line 261, in build_extension
+    _build_ext.build_extension(self, ext)
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/setuptools/_distutils/command/build_ext.py", line 565, in build_extension
+    objects = self.compiler.compile(
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py", line 681, in unix_wrap_ninja_compile
+    _write_ninja_file_and_compile_objects(
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py", line 1784, in _write_ninja_file_and_compile_objects
+    _run_ninja_build(
+  File "/home/paulhoheisel/miniconda/envs/3dgs/lib/python3.10/site-packages/torch/utils/cpp_extension.py", line 2120, in _run_ninja_build
+    raise RuntimeError(message) from e
+RuntimeError: Error compiling objects for extension
