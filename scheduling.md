@@ -90,3 +90,20 @@ with open("test_metrics_adaptive_schedule_x.csv", "a") as f:
     third_phase_frequency = 1500
 
     first_phase_max_degree = 2
+
+
+    # schedule 5:
+    schedule_name = "adaptive_schedule_5"
+    average_gradients_over = 50
+    first_phase_start = 1000
+    second_phase_start = 5000
+    third_phase_start = 15000
+
+    first_phase_ratio = 0.0025
+    second_phase_ratio = 0.0025
+    third_phase_ratio = 0.0025
+
+    first_phase_frequency = 100
+    second_phase_frequency = 250
+    third_phase_frequency = 1000
+

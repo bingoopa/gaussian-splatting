@@ -1014,8 +1014,8 @@ class GaussianModel:
         unique, counts = torch.unique(self.sh_degrees, return_counts=True)
         for u, c in zip(unique.cpu().numpy(), counts.cpu().numpy()):
             print(f"SH degree {u}: {c/total_points*100:.2f}% Gaussians")
-        with open(f"sh_degree_distribution_{schedule_name}.csv", "w") as f:
-            f.write("iteration,sh_degree,percentage,num_gaussians\n")
+        # Save to CSV in new line:
+        with open(f"sh_degree_distribution_{schedule_name}.csv", "a") as f:
             for u, c in zip(unique.cpu().numpy(), counts.cpu().numpy()):
                 f.write(f"{iteration},{u},{c/total_points*100:.2f},{c}\n")
 
