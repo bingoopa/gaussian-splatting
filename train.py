@@ -67,10 +67,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if need_color_grads or color_grad_stats:
         gaussians.set_random_sh_degrees()
 
+    # New: introduce early stopping
+    # ---- Early stopping state (define once, e.g. before training loop) ----
+    global best_test_psnr, best_iter, patience, min_delta, early_stop
+    best_test_psnr = -1e9
+    best_iter = -1
+    patience = 10000          # how many iterations to wait
+    min_delta = 0.01 
+    early_stop = False
+
+
     # Compute color gradients if needed (explicitly requested or for adaptive SH)
     need_color_grads = need_color_grads or adaptive_sh
 
-    # New: parameters for adaptive SH increase
+    '''schedule 1:
     first_phase_start = 2000 # standard: 5000
     second_phase_start = 6000 # standard: 10000
     third_phase_start = 12000 # standard: 20000
@@ -82,7 +92,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     first_phase_frequency = 250 # standard: 500
     second_phase_frequency = 250 # standard: 500
     third_phase_frequency = 1500 # standard: 1000
-
+    '''
     '''
     schedule 2:
     first_phase_start = 2000 # standard: 5000
@@ -97,6 +107,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     second_phase_frequency = 250 # standard: 500
     third_phase_frequency = 1500 # standard: 1000
     '''
+    # schedule 3:
+    first_phase_start  = 2000
+    second_phase_start = 6000
+    third_phase_start  = 12000
+    third_phase_end    = opt.iterations - 1
+
+    average_gradients_over = 50   # ↓ faster reaction
+
+    first_phase_ratio  = 0.01    # ↑ slightly more early capacity
+    second_phase_ratio = 0.015    # ↑ main expressive window
+    third_phase_ratio  = 0.001    # ↓↓↓ strong taper (key change)
+
+    first_phase_frequency  = 250
+    second_phase_frequency = 250
+    third_phase_frequency  = 2000 # ↓ late churn
+
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -174,6 +200,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+            if early_stop:
+                print(f"\n[EARLY STOP] Stopping training at iteration {iteration} due to no PSNR improvement.")
+                #print(f"[PSNR] iter={iteration}, test={psnr_test:.3f}, best={best_test_psnr:.3f}")
+
+                break
 
             # New: compute color gradient stats/ adapt SH degrees
             """
@@ -203,7 +234,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.get_sh_degree_distribution()
             elif iteration >= second_phase_start and iteration < third_phase_start:
                 if (iteration - second_phase_start) % second_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio, maximum_degree=2) # schedule 3
                     gaussians.get_sh_degree_distribution()
             elif iteration >= third_phase_start and iteration <= third_phase_end:
                 if (iteration - third_phase_start) % third_phase_frequency == 0:
@@ -351,7 +382,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
 
-                with open("test_metrics_adaptive_schedule_2.csv", "a") as f:
+                with open("test_metrics_adaptive_schedule_3.csv", "a") as f:
                     f.write(f"{iteration},{psnr_test},{ssim_test},{lpips_test}\n")
 
 
@@ -361,11 +392,25 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - ssim', ssim_test, iteration)
                     tb_writer.add_scalar(config['name'] + '/loss_viewpoint - lpips', lpips_test, iteration)
 
+                if config['name'] == 'test' and compute_psnr_ssim:
+                    print("[EARLY STOP] Checking early stopping criteria at iter {}".format(iteration))
+                    global best_test_psnr, best_iter, patience, min_delta, early_stop
+                    if psnr_test > best_test_psnr + min_delta:
+                        best_test_psnr = psnr_test
+                        best_iter = iteration
+                    else:
+                        if iteration - best_iter > patience:
+                            print(
+                                f"[EARLY STOP] No PSNR improvement > {min_delta} "
+                                f"for {patience} iterations. "
+                                f"Best PSNR {best_test_psnr:.3f} at iter {best_iter}."
+                            )
+                            early_stop = True
         if tb_writer:
             tb_writer.add_histogram("scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
             tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
         torch.cuda.empty_cache()
-
+        
 
 @torch.no_grad()
 def eval_and_save(model_path, scene: Scene, renderFunc, renderArgs):
