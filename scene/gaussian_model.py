@@ -1008,12 +1008,16 @@ class GaussianModel:
         random_degrees = torch.randint(0, self.max_sh_degree + 1, (n_points,), device=self.sh_degrees.device, dtype=torch.int64)
         self._apply_new_sh_degrees(random_degrees)
 
-    def get_sh_degree_distribution(self):
+    def get_sh_degree_distribution(self, schedule_name="", iteration=0):
         total_points = self.sh_degrees.shape[0]
         print(f"Total Gaussians: {total_points}")
         unique, counts = torch.unique(self.sh_degrees, return_counts=True)
         for u, c in zip(unique.cpu().numpy(), counts.cpu().numpy()):
             print(f"SH degree {u}: {c/total_points*100:.2f}% Gaussians")
+        with open(f"sh_degree_distribution_{schedule_name}.csv", "w") as f:
+            f.write("iteration,sh_degree,percentage,num_gaussians\n")
+            for u, c in zip(unique.cpu().numpy(), counts.cpu().numpy()):
+                f.write(f"{iteration},{u},{c/total_points*100:.2f},{c}\n")
 
     def get_sh_degrees_by_indices(self, indices):
         return self.sh_degrees[indices]
@@ -1105,9 +1109,11 @@ class GaussianModel:
     
     # Old method
     
-    def increase_sh_degree_based_on_color_grads(self, ratio=0.05, maximum_degree = 3):
-        valid_degree = self.sh_degrees < maximum_degree
-        quantile_value = torch.quantile(self.accum_color_grads_dc, 1-ratio)
+    def increase_sh_degree_based_on_color_grads(self, ratio=0.05, maximum_degree = 3, only_for_degree = None):
+        valid_degree = (self.sh_degrees < maximum_degree)
+        if only_for_degree is not None:
+            valid_degree = valid_degree & (self.sh_degrees == only_for_degree)
+        quantile_value = torch.quantile(self.accum_color_grads_dc[valid_degree], 1-ratio)
         valid = (self.accum_color_grads_dc > quantile_value).squeeze()
         valid = valid & valid_degree
         #valid = to_increase & (self.sh_degrees < self.max_sh_degree)

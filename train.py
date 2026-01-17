@@ -72,7 +72,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     global best_test_psnr, best_iter, patience, min_delta, early_stop
     best_test_psnr = -1e9
     best_iter = -1
-    patience = 10000          # how many iterations to wait
+    patience = 8000          # how many iterations to wait
     min_delta = 0.01 
     early_stop = False
 
@@ -107,21 +107,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     second_phase_frequency = 250 # standard: 500
     third_phase_frequency = 1500 # standard: 1000
     '''
-    # schedule 3:
-    first_phase_start  = 2000
-    second_phase_start = 6000
-    third_phase_start  = 12000
-    third_phase_end    = opt.iterations - 1
+    # schedule 4:
+    global schedule_name 
+    schedule_name = "adaptive_schedule_4"
+    average_gradients_over = 50
+    first_phase_start = 1000
+    second_phase_start = 5000
+    third_phase_start = 15000
 
-    average_gradients_over = 50   # ↓ faster reaction
+    first_phase_ratio = 0.01
+    second_phase_ratio_for_degree_2 = 0.01
+    second_phase_ratio_for_degree_1 = 0.01
+    second_phase_ratio_for_degree_0 = 0.0025
+    third_phase_ratio = 0.001
 
-    first_phase_ratio  = 0.01    # ↑ slightly more early capacity
-    second_phase_ratio = 0.015    # ↑ main expressive window
-    third_phase_ratio  = 0.001    # ↓↓↓ strong taper (key change)
-
-    first_phase_frequency  = 250
+    first_phase_frequency = 250
     second_phase_frequency = 250
-    third_phase_frequency  = 2000 # ↓ late churn
+    third_phase_frequency = 1500
+
+    first_phase_max_degree = 2
+    third_phase_end = opt.iterations - 1
 
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -230,16 +235,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # New scheduling of SH degree increase based on color gradients
             if iteration >= first_phase_start and iteration < second_phase_start:
                 if (iteration - first_phase_start) % first_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio, maximum_degree=1)
-                    gaussians.get_sh_degree_distribution()
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio, maximum_degree=first_phase_max_degree)
+                    gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             elif iteration >= second_phase_start and iteration < third_phase_start:
                 if (iteration - second_phase_start) % second_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio, maximum_degree=2) # schedule 3
-                    gaussians.get_sh_degree_distribution()
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio_for_degree_2, only_for_degree=2)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio_for_degree_1, only_for_degree=1)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio_for_degree_0, only_for_degree=0)
+                    gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             elif iteration >= third_phase_start and iteration <= third_phase_end:
                 if (iteration - third_phase_start) % third_phase_frequency == 0:
                     gaussians.increase_sh_degree_based_on_color_grads(ratio=third_phase_ratio)
-                    gaussians.get_sh_degree_distribution()
+                    gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             
 
             # ------------------------------
@@ -382,7 +389,8 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 l1_test /= len(config['cameras'])
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
 
-                with open("test_metrics_adaptive_schedule_3.csv", "a") as f:
+                global schedule_name
+                with open(f"test_metrics_{schedule_name}.csv", "a") as f:
                     f.write(f"{iteration},{psnr_test},{ssim_test},{lpips_test}\n")
 
 
