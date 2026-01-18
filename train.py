@@ -111,19 +111,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     global schedule_name 
     # schedule 5:
     schedule_name = "adaptive_schedule_5"
-    average_gradients_over = 50
-    first_phase_start = 1000
-    second_phase_start = 5000
-    third_phase_start = 15000
+    first_phase_start = 2000 
+    second_phase_start = 6000 
+    third_phase_start = 12000
+    third_phase_end = 25000
 
-    first_phase_ratio = 0.0025
-    second_phase_ratio = 0.0025
-    third_phase_ratio = 0.0025
+    average_gradients_over = 100 
 
-    first_phase_frequency = 100
-    second_phase_frequency = 250
-    third_phase_frequency = 1000
-    third_phase_end = opt.iterations - 1
+    first_phase_ratio = 0.03 
+    second_phase_ratio = 0.025 
+    third_phase_ratio = 0.005 
+
+    first_phase_frequency = 750 
+    second_phase_frequency = 750 
+    third_phase_frequency = 1500 
+
+    first_phase_max_degree = 1
+    second_phase_max_degree = 3
+    third_phase_max_degree = 3
 
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -232,15 +237,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # New scheduling of SH degree increase based on color gradients
             if iteration >= first_phase_start and iteration < second_phase_start:
                 if (iteration - first_phase_start) % first_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio, maximum_degree=first_phase_max_degree)
                     gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             elif iteration >= second_phase_start and iteration < third_phase_start:
                 if (iteration - second_phase_start) % second_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio, maximum_degree=second_phase_max_degree)
                     gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             elif iteration >= third_phase_start and iteration <= third_phase_end:
                 if (iteration - third_phase_start) % third_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=third_phase_ratio)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=third_phase_ratio, maximum_degree=third_phase_max_degree)
                     gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             
 

@@ -97,13 +97,31 @@ with open("test_metrics_adaptive_schedule_x.csv", "a") as f:
     average_gradients_over = 50
     first_phase_start = 1000
     second_phase_start = 5000
-    third_phase_start = 15000
+    third_phase_start = 10000
 
-    first_phase_ratio = 0.0025
-    second_phase_ratio = 0.0025
-    third_phase_ratio = 0.0025
+    first_phase_ratio = 0.005
+    second_phase_ratio = 0.001
+    third_phase_ratio = 0.001
 
     first_phase_frequency = 100
     second_phase_frequency = 250
-    third_phase_frequency = 1000
+    third_phase_frequency = 500
 
+    
+    
+    schedule 6:
+    first_phase_start = 2000 
+    second_phase_start = 6000 
+    third_phase_start = 12000
+    third_phase_end = 25000 
+    average_gradients_over = 100 
+    first_phase_ratio = 0.03 
+    second_phase_ratio = 0.025 
+    third_phase_ratio = 0.005 
+    first_phase_frequency = 750 
+    second_phase_frequency = 750 
+    third_phase_frequency = 1500 
+
+    first_phase_max_degree = 1
+    second_phase_max_degree = 3
+    third_phase_max_degree = 3
