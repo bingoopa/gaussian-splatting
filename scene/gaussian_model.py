@@ -51,6 +51,7 @@ class GaussianModel:
     def __init__(self, sh_degree : int):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
+        print("sh_degree in GaussianModel:", sh_degree)
         self._xyz = torch.empty(0)
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
@@ -65,6 +66,9 @@ class GaussianModel:
         self.accum_color_grads_dc = torch.empty(0)
         self.accum_color_grads_rest = torch.empty(0)
         self.color_denom = 0
+        # last_promotion_iter: per-gaussian iteration index of last SH-degree promotion
+        # -1 means never promoted
+        self.last_promotion_iter = torch.empty(0, dtype=torch.int64)
         # New
         
 
@@ -102,6 +106,7 @@ class GaussianModel:
             "color_denom": self.color_denom,
             "df": self.df,
             "sh_degrees": self.sh_degrees,
+            "last_promotion_iter": self.last_promotion_iter,
             "sh_state": sh_state,
         }
     
@@ -130,6 +135,20 @@ class GaussianModel:
             sh_degrees = state["sh_degrees"]
             self.sh_storage = self._build_storage_from_dense(dense, sh_degrees)
         self._sync_sh_degrees_from_storage()
+
+        # restore last_promotion_iter if present, otherwise initialize to -1 per gaussian
+        device = self._xyz.device if hasattr(self, "_xyz") and isinstance(self._xyz, torch.Tensor) and self._xyz.numel() > 0 else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        last_iter = state.get("last_promotion_iter", None)
+        if last_iter is not None:
+            # ensure tensor on correct device and dtype
+            self.last_promotion_iter = last_iter.to(device=device, dtype=torch.int64)
+        else:
+            # init -1 matching number of gaussians
+            n = int(self.sh_degrees.shape[0]) if self.sh_degrees is not None and self.sh_degrees.numel() > 0 else 0
+            if n > 0:
+                self.last_promotion_iter = torch.full((n,), -1, device=device, dtype=torch.int64)
+            else:
+                self.last_promotion_iter = torch.empty((0,), dtype=torch.int64, device=device)
 
         self.training_setup(training_args)
         self.xyz_gradient_accum = state["xyz_gradient_accum"]
@@ -186,6 +205,15 @@ class GaussianModel:
         }
 
     def _build_storage_from_dense(self, dense_sh, sh_degrees):
+        # dense_sh is expected to be [N, 3, K] (N gaussians, 3 color channels, K coeffs)
+        # but older/alternate layouts might be [N, K, 3]. Detect and handle both.
+        if dense_sh.dim() != 3:
+            raise RuntimeError(f"dense_sh must be a 3D tensor, got shape {tuple(dense_sh.shape)}")
+
+        # If layout is [N, K, 3], permute to [N, 3, K]
+        if dense_sh.shape[1] != 3 and dense_sh.shape[2] == 3:
+            dense_sh = dense_sh.permute(0, 2, 1).contiguous()
+
         device = dense_sh.device
         num_gauss = dense_sh.shape[0]
         storage = SHStorage(
@@ -220,6 +248,59 @@ class GaussianModel:
             return
         device = self.sh_storage.sh_coeffs_flat.device
         self.sh_degrees = self.sh_storage.sh_degrees.to(device=device, dtype=torch.int64)
+
+    def _validate_gaussian_consistency(self, context: str = ""):
+        """
+        Validates that all gaussian counts are consistent across different storage locations.
+        Checks:
+        - Number of xyz coordinates matches sh_degrees
+        - Number of sh_degrees matches sh_storage.num_gaussians
+        - Total sh_coeffs_flat size matches expected size based on sh_degrees
+        - opacity, scaling, rotation counts match xyz
+        """
+        xyz_count = self._xyz.shape[0] if self._xyz.numel() > 0 else 0
+        opacity_count = self._opacity.shape[0] if self._opacity.numel() > 0 else 0
+        scaling_count = self._scaling.shape[0] if self._scaling.numel() > 0 else 0
+        rotation_count = self._rotation.shape[0] if self._rotation.numel() > 0 else 0
+        sh_degrees_count = self.sh_degrees.shape[0] if self.sh_degrees.numel() > 0 else 0
+        
+        errors = []
+        
+        # Check that all gaussian-level parameters have matching counts
+        if xyz_count != opacity_count:
+            errors.append(f"xyz({xyz_count}) != opacity({opacity_count})")
+        if xyz_count != scaling_count:
+            errors.append(f"xyz({xyz_count}) != scaling({scaling_count})")
+        if xyz_count != rotation_count:
+            errors.append(f"xyz({xyz_count}) != rotation({rotation_count})")
+        if xyz_count != sh_degrees_count:
+            errors.append(f"xyz({xyz_count}) != sh_degrees({sh_degrees_count})")
+        
+        if self.sh_storage is not None:
+            storage_gauss_count = self.sh_storage.num_gaussians
+            if xyz_count != storage_gauss_count:
+                errors.append(f"xyz({xyz_count}) != sh_storage.num_gaussians({storage_gauss_count})")
+            
+            # Check sh_coeffs_flat size
+            expected_total_coeffs = int(((self.sh_storage.sh_degrees + 1) ** 2).sum().item())
+            actual_total_coeffs = self.sh_storage.sh_coeffs_flat.shape[0]
+            if expected_total_coeffs != actual_total_coeffs:
+                errors.append(f"expected_coeffs({expected_total_coeffs}) != actual_coeffs({actual_total_coeffs})")
+            
+            # Check gauss_offsets consistency
+            offsets = self.sh_storage.gauss_offsets
+            counts = self.sh_storage.num_coeffs_per_gauss
+            if offsets.shape[0] != sh_degrees_count:
+                errors.append(f"gauss_offsets({offsets.shape[0]}) != sh_degrees({sh_degrees_count})")
+            if counts.shape[0] != sh_degrees_count:
+                errors.append(f"num_coeffs_per_gauss({counts.shape[0]}) != sh_degrees({sh_degrees_count})")
+        
+        if errors:
+            error_msg = f"Gaussian consistency check FAILED {context}:\n  " + "\n  ".join(errors)
+            print(f"ERROR: {error_msg}")
+            raise RuntimeError(error_msg)
+        else:
+            print(f"✓ Gaussian consistency check OK {context}: {xyz_count} gaussians")
 
     def _remap_sh_optimizer(self, mapping):
         if self.optimizer is None:
@@ -256,6 +337,114 @@ class GaussianModel:
                 new_state[key] = new_tensor
             self.optimizer.state[new_param] = new_state
             return
+
+    def _extend_sh_optimizer_state(self, clone_indices):
+        """
+        Extends the SH optimizer state when cloning/splitting gaussians.
+        For each cloned gaussian, replicates the moments (exp_avg, exp_avg_sq) 
+        of the corresponding old gaussian for the newly added coefficients.
+        
+        clone_indices: tensor of shape [num_new_gaussians] containing the indices
+                       of the old gaussians that were cloned/split
+        """
+        if self.optimizer is None:
+            return
+        
+        for group in self.optimizer.param_groups:
+            if group["name"] != "sh_coeffs":
+                continue
+            
+            param = group["params"][0]
+            old_state = self.optimizer.state.get(param, None)
+            if old_state is None:
+                return
+            
+            # Get the offset mapping for each newly added gaussian
+            # We need to know which coefficients in sh_coeffs_flat correspond to each gaussian
+            old_gauss_offsets = self.sh_storage.gauss_offsets[:-clone_indices.shape[0]]  # offsets before extension
+            old_gauss_counts = self.sh_storage.num_coeffs_per_gauss[:-clone_indices.shape[0]]
+            new_gauss_offsets = self.sh_storage.gauss_offsets[-clone_indices.shape[0]:]  # offsets of newly added
+            new_gauss_counts = self.sh_storage.num_coeffs_per_gauss[-clone_indices.shape[0]:]
+            
+            for key in ("exp_avg", "exp_avg_sq"):
+                if key not in old_state:
+                    continue
+                old_moments = old_state[key]
+                
+                # For each new gaussian, replicate the moments of its source gaussian
+                for new_gauss_idx, source_gauss_idx in enumerate(clone_indices):
+                    source_idx = int(source_gauss_idx.item())
+                    source_offset = int(old_gauss_offsets[source_idx].item())
+                    source_count = int(old_gauss_counts[source_idx].item())
+                    
+                    new_offset = int(new_gauss_offsets[new_gauss_idx].item())
+                    new_count = int(new_gauss_counts[new_gauss_idx].item())
+                    
+                    # Copy moments from source coefficients to new coefficients
+                    # Handle case where source and new have different numbers of coefficients
+                    copy_count = min(source_count, new_count)
+                    if copy_count > 0:
+                        old_moments[new_offset:new_offset + copy_count] = old_moments[source_offset:source_offset + copy_count]
+                    
+                    # Zero out any additional coefficients if new has more than source
+                    if new_count > source_count:
+                        old_moments[new_offset + source_count:new_offset + new_count] = 0.0
+
+    def _extend_sh_optimizer_state_for_densification(self, clone_indices):
+        """
+        Helper method to extend SH optimizer state after densification (clone/split).
+        This method extracts the source gaussian indices from clone_indices and replicates
+        their optimizer moments to the newly created gaussians.
+        
+        Args:
+            clone_indices: Tensor of indices of source gaussians that were cloned/split.
+                          The storage already contains the new cloned gaussians appended at the end.
+        """
+        if self.optimizer is None or clone_indices.numel() == 0:
+            return
+        
+        for group in self.optimizer.param_groups:
+            if group["name"] != "sh_coeffs":
+                continue
+            
+            param = group["params"][0]
+            stored_state = self.optimizer.state.get(param, None)
+            if stored_state is None:
+                # If no state exists, initialize with zeros
+                stored_state = {
+                    "exp_avg": torch.zeros_like(param),
+                    "exp_avg_sq": torch.zeros_like(param),
+                }
+                self.optimizer.state[param] = stored_state
+                return
+            
+            # Get total number of new gaussians added (stored in sh_storage)
+            total_old_gauss_before = self.sh_storage.num_gaussians - clone_indices.shape[0]
+            
+            # For each source gaussian in clone_indices, replicate its moments to the corresponding new gaussian
+            for new_gauss_relative_idx, source_gauss_idx in enumerate(clone_indices):
+                source_idx = int(source_gauss_idx.item())
+                
+                # Get old and new offsets and counts
+                source_offset = int(self.sh_storage.gauss_offsets[source_idx].item())
+                source_count = int(self.sh_storage.num_coeffs_per_gauss[source_idx].item())
+                
+                new_gauss_idx = total_old_gauss_before + new_gauss_relative_idx
+                new_offset = int(self.sh_storage.gauss_offsets[new_gauss_idx].item())
+                new_count = int(self.sh_storage.num_coeffs_per_gauss[new_gauss_idx].item())
+                
+                # Replicate moments for exp_avg and exp_avg_sq
+                for key in ("exp_avg", "exp_avg_sq"):
+                    if key in stored_state:
+                        moments = stored_state[key]
+                        # Copy existing moments from source
+                        copy_count = min(source_count, new_count)
+                        if copy_count > 0 and source_offset + copy_count <= moments.shape[0] and new_offset + copy_count <= moments.shape[0]:
+                            moments[new_offset:new_offset + copy_count] = moments[source_offset:source_offset + copy_count].clone()
+                        
+                        # Zero out extra coefficients if new has more than source
+                        if new_count > source_count:
+                            moments[new_offset + source_count:new_offset + new_count] = 0.0
 
     def _apply_new_sh_degrees(self, new_degrees):
         if self.sh_storage is None:
@@ -314,6 +503,7 @@ class GaussianModel:
             num_gaussians=fused_point_cloud.shape[0],
             device=fused_point_cloud.device,
             max_degree=self.max_sh_degree,
+            init_deg=3
         )
         self.sh_storage.initialize_sh_from_color(fused_color)
         self._sync_sh_degrees_from_storage()
@@ -332,6 +522,10 @@ class GaussianModel:
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        # initialize last_promotion_iter to -1 (never promoted)
+        n = self.get_xyz.shape[0]
+        device = fused_point_cloud.device
+        self.last_promotion_iter = torch.full((n,), -1, device=device, dtype=torch.int64)
 
     def training_setup(self, training_args):
         if self.sh_storage is None:
@@ -353,6 +547,10 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
+        
+        # Consistency check after training setup
+        print("[training_setup] Checking initial consistency...")
+        #self._validate_gaussian_consistency("[after training_setup]")
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -514,41 +712,88 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device=device).requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device=device).requires_grad_(True))
 
-        # Expect the compact SH storage format (written by save_ply)
+        # Expect either the compact SH storage format (written by save_ply)
+        # or the legacy per-vertex dense SH fields (f_dc_* and f_rest_*).
         vertex_props = [p.name for p in plydata.elements[0].properties]
-        if not ('sh_offset' in vertex_props and 'sh_num_coeffs' in vertex_props):
-            raise RuntimeError("PLY does not contain compact SH metadata fields ('sh_offset' and 'sh_num_coeffs').")
+        if ('sh_offset' in vertex_props and 'sh_num_coeffs' in vertex_props):
+            # Read per-vertex metadata
+            sh_offsets_np = np.asarray(plydata.elements[0]['sh_offset']).astype(np.int64)
+            num_coeffs_np = np.asarray(plydata.elements[0]['sh_num_coeffs']).astype(np.int64)
+            if 'sh_degrees' in vertex_props:
+                sh_degrees_np = np.asarray(plydata.elements[0]['sh_degrees']).astype(np.int64)
+            else:
+                sh_degrees_np = np.array([int(math.isqrt(int(n)) - 1) for n in num_coeffs_np], dtype=np.int64)
 
-        # Read per-vertex metadata
-        sh_offsets_np = np.asarray(plydata.elements[0]['sh_offset']).astype(np.int64)
-        num_coeffs_np = np.asarray(plydata.elements[0]['sh_num_coeffs']).astype(np.int64)
-        if 'sh_degrees' in vertex_props:
-            sh_degrees_np = np.asarray(plydata.elements[0]['sh_degrees']).astype(np.int64)
+            # Read packed SH coeffs element
+            try:
+                sh_el = next(e for e in plydata.elements if e.name == 'sh_coeffs')
+            except StopIteration:
+                raise RuntimeError("PLY missing 'sh_coeffs' element required for compact format.")
+
+            sh_r = np.asarray(sh_el['r'])
+            sh_g = np.asarray(sh_el['g'])
+            sh_b = np.asarray(sh_el['b'])
+            sh_coeffs_np = np.stack((sh_r, sh_g, sh_b), axis=1).astype(np.float32)
+
+            # Build serialized state and load via SHStorage.from_serialized onto chosen device
+            sh_state = {
+                'sh_coeffs_flat': torch.tensor(sh_coeffs_np, dtype=torch.float32, device=device),
+                'gauss_offsets': torch.tensor(sh_offsets_np, dtype=torch.int32, device=device),
+                'num_coeffs_per_gauss': torch.tensor(num_coeffs_np, dtype=torch.int32, device=device),
+                'sh_degrees': torch.tensor(sh_degrees_np, dtype=torch.int32, device=device),
+                'max_degree': int(int(sh_degrees_np.max())) if sh_degrees_np.size > 0 else 0,
+            }
+            self.sh_storage = SHStorage.from_serialized(sh_state, device=device)
+            self._sync_sh_degrees_from_storage()
+            self.active_sh_degree = int(self.sh_degrees.max().item()) if self.sh_degrees.numel() > 0 else 0
         else:
-            sh_degrees_np = np.array([int(math.isqrt(int(n)) - 1) for n in num_coeffs_np], dtype=np.int64)
+            # Try legacy per-vertex dense SH attributes: f_dc_0..2 and f_rest_* (flattened r,g,b for coeffs 1..K-1)
+            f_dc_names = [n for n in vertex_props if n.startswith('f_dc_')]
+            f_rest_names = [n for n in vertex_props if n.startswith('f_rest_')]
+            if len(f_dc_names) == 3 and len(f_rest_names) >= 0:
+                # sort names by index
+                f_dc_names = sorted(f_dc_names, key=lambda x: int(x.split('_')[-1]))
+                f_rest_names = sorted(f_rest_names, key=lambda x: int(x.split('_')[-1]))
+                # read arrays
+                dc_r = np.asarray(plydata.elements[0][f_dc_names[0]])
+                dc_g = np.asarray(plydata.elements[0][f_dc_names[1]])
+                dc_b = np.asarray(plydata.elements[0][f_dc_names[2]])
+                N = dc_r.shape[0]
+                rest_count = len(f_rest_names)
+                if rest_count % 3 != 0:
+                    raise RuntimeError(f"Unexpected number of f_rest_ fields: {rest_count}, not divisible by 3")
+                K = 1 + (rest_count // 3)
+                # allocate dense SH [N, 3, K]
+                dense = np.zeros((N, 3, K), dtype=np.float32)
+                dense[:, 0, 0] = dc_r
+                dense[:, 1, 0] = dc_g
+                dense[:, 2, 0] = dc_b
+                # fill remaining coeffs
+                if rest_count > 0:
+                    # Original PLY export flattens channel-major: [r_k0, r_k1, ..., g_k0, g_k1, ..., b_k0, b_k1, ...]
+                    # Read the flat rest values and reshape to (N, 3, K-1) so that axis 1=channel, axis 2=coeff
+                    rest_vals = np.vstack([np.asarray(plydata.elements[0][name]) for name in f_rest_names]).T  # shape (N, rest_count)
+                    try:
+                        rest_reshaped = rest_vals.reshape((N, 3, K - 1))
+                    except Exception:
+                        # Fallback to previous interleaved interpretation if reshape fails
+                        rest_reshaped = np.zeros((N, 3, K - 1), dtype=np.float32)
+                        for kk in range(1, K):
+                            base = (kk - 1) * 3
+                            rest_reshaped[:, 0, kk - 1] = rest_vals[:, base + 0]
+                            rest_reshaped[:, 1, kk - 1] = rest_vals[:, base + 1]
+                            rest_reshaped[:, 2, kk - 1] = rest_vals[:, base + 2]
 
-        # Read packed SH coeffs element
-        try:
-            sh_el = next(e for e in plydata.elements if e.name == 'sh_coeffs')
-        except StopIteration:
-            raise RuntimeError("PLY missing 'sh_coeffs' element required for compact format.")
+                    dense[:, :, 1:] = rest_reshaped
 
-        sh_r = np.asarray(sh_el['r'])
-        sh_g = np.asarray(sh_el['g'])
-        sh_b = np.asarray(sh_el['b'])
-        sh_coeffs_np = np.stack((sh_r, sh_g, sh_b), axis=1).astype(np.float32)
-
-        # Build serialized state and load via SHStorage.from_serialized onto chosen device
-        sh_state = {
-            'sh_coeffs_flat': torch.tensor(sh_coeffs_np, dtype=torch.float32, device=device),
-            'gauss_offsets': torch.tensor(sh_offsets_np, dtype=torch.int32, device=device),
-            'num_coeffs_per_gauss': torch.tensor(num_coeffs_np, dtype=torch.int32, device=device),
-            'sh_degrees': torch.tensor(sh_degrees_np, dtype=torch.int32, device=device),
-            'max_degree': int(int(sh_degrees_np.max())) if sh_degrees_np.size > 0 else 0,
-        }
-        self.sh_storage = SHStorage.from_serialized(sh_state, device=device)
-        self._sync_sh_degrees_from_storage()
-        self.active_sh_degree = int(self.sh_degrees.max().item()) if self.sh_degrees.numel() > 0 else 0
+                # build storage from dense representation
+                dense_t = torch.tensor(dense, dtype=torch.float32, device=device)
+                sh_degrees_np = np.full((N,), int(math.isqrt(K) - 1), dtype=np.int64)
+                self.sh_storage = self._build_storage_from_dense(dense_t, torch.tensor(sh_degrees_np, dtype=torch.int32, device=device))
+                self._sync_sh_degrees_from_storage()
+                self.active_sh_degree = int(self.sh_degrees.max().item()) if self.sh_degrees.numel() > 0 else 0
+            else:
+                raise RuntimeError("PLY does not contain compact SH metadata ('sh_offset'/'sh_num_coeffs') nor legacy f_dc_/f_rest_ fields.")
 
 
     """
@@ -728,7 +973,19 @@ class GaussianModel:
         return optimizable_tensors
 
     def prune_points(self, mask):
+        """
+        Prunes gaussians marked as False in mask.
+        Verifies consistency before and after pruning.
+        """
+        # Consistency check before prune
+        print(f"[prune_points] Before prune: checking consistency...")
+        #self._validate_gaussian_consistency("[before prune_points]")
+        
         valid_points_mask = ~mask
+        num_to_prune = mask.sum().item()
+        num_remaining = valid_points_mask.sum().item()
+        print(f"[prune_points] Pruning {num_to_prune} gaussians, keeping {num_remaining}")
+        
         counts = self.sh_storage.num_coeffs_per_gauss.to(device=valid_points_mask.device)
         if counts.shape[0] != valid_points_mask.shape[0]:
             raise RuntimeError(
@@ -750,6 +1007,19 @@ class GaussianModel:
         # New
         self.sh_storage.prune_gaussians(valid_points_mask, optimizable_tensors.get("sh_coeffs"))
         self._sync_sh_degrees_from_storage()
+        # prune last_promotion_iter flags to keep in sync with gaussians
+        if hasattr(self, "last_promotion_iter") and self.last_promotion_iter is not None and self.last_promotion_iter.numel() != 0:
+            try:
+                self.last_promotion_iter = self.last_promotion_iter[valid_points_mask]
+            except Exception:
+                # fallback: reset to -1 if sizes mismatch
+                n = int(self.sh_degrees.shape[0]) if self.sh_degrees is not None and self.sh_degrees.numel() > 0 else 0
+                device = self.sh_storage.sh_coeffs_flat.device if self.sh_storage is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self.last_promotion_iter = torch.full((n,), -1, device=device, dtype=torch.int64)
+        
+        # Consistency check after prune
+        print(f"[prune_points] After prune: checking consistency...")
+        #self._validate_gaussian_consistency("[after prune_points]")
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -805,7 +1075,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_opacities, new_scaling, new_rotation, new_sh_coeffs=None):
+    def densification_postfix(self, new_xyz, new_opacities, new_scaling, new_rotation, new_sh_coeffs=None, new_last_promotion_iter=None):
         d = {
             "xyz": new_xyz,
             "opacity": new_opacities,
@@ -827,9 +1097,41 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
         self._sync_sh_degrees_from_storage()
+        # append last_promotion_iter entries for newly created gaussians (if provided), otherwise append -1
+        try:
+            n_existing = int(self.last_promotion_iter.shape[0]) if hasattr(self, "last_promotion_iter") and self.last_promotion_iter is not None and self.last_promotion_iter.numel() > 0 else 0
+        except Exception:
+            n_existing = 0
+        n_new = int(self.get_xyz.shape[0]) - n_existing
+        device = self.sh_storage.sh_coeffs_flat.device if self.sh_storage is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if new_last_promotion_iter is not None:
+            # ensure correct device and dtype and length
+            new_last_promotion_iter = new_last_promotion_iter.to(device=device, dtype=torch.int64)
+            if new_last_promotion_iter.numel() != n_new:
+                # if clone ids repeated, allow broadcasting or trim/pad
+                if new_last_promotion_iter.numel() < n_new:
+                    pad = torch.full((n_new - new_last_promotion_iter.numel(),), -1, device=device, dtype=torch.int64)
+                    new_last_promotion_iter = torch.cat([new_last_promotion_iter, pad], dim=0)
+                else:
+                    new_last_promotion_iter = new_last_promotion_iter[:n_new]
+            if n_existing > 0:
+                self.last_promotion_iter = torch.cat([self.last_promotion_iter.to(device=device), new_last_promotion_iter], dim=0)
+            else:
+                self.last_promotion_iter = new_last_promotion_iter
+        else:
+            # extend with -1
+            pad = torch.full((n_new,), -1, device=device, dtype=torch.int64)
+            if n_existing > 0:
+                self.last_promotion_iter = torch.cat([self.last_promotion_iter.to(device=device), pad], dim=0)
+            else:
+                self.last_promotion_iter = pad
 
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2): #TODO: hier sollen sh-degrees mitkopiert werden beim splitting
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        """
+        Splits gaussians with high gradients and large size.
+        Updates the SH optimizer state such that newly cloned gaussians keep their moments.
+        """
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -842,6 +1144,8 @@ class GaussianModel:
         if selected_indices.numel() == 0:
             return
 
+        print(f"[densify_and_split] Splitting {selected_indices.shape[0]} gaussians (x{N})")
+        
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
         samples = torch.normal(mean=means, std=stds)
@@ -850,29 +1154,68 @@ class GaussianModel:
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
-        # Neue SH Speicherung
+        # Neue SH Speicherung - record the index of old gaussians before duplication
         clone_ids = selected_indices.repeat_interleave(N)
+        num_old_gaussians = self._xyz.shape[0]
         new_sh_coeffs = self.sh_storage.duplicate_sh_of_gaussians(clone_ids)
 
-        self.densification_postfix(new_xyz, new_opacity, new_scaling, new_rotation, new_sh_coeffs=new_sh_coeffs)
+        # duplicate last_promotion_iter flags for the new gaussians
+        if hasattr(self, "last_promotion_iter") and self.last_promotion_iter is not None and self.last_promotion_iter.numel() > 0:
+            new_last = self.last_promotion_iter[clone_ids]
+        else:
+            new_last = None
+
+        self.densification_postfix(new_xyz, new_opacity, new_scaling, new_rotation, new_sh_coeffs=new_sh_coeffs, new_last_promotion_iter=new_last)
+
+        # Extended SH optimizer state: replicate moments for newly cloned gaussians
+        self._extend_sh_optimizer_state_for_densification(clone_ids)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
+        
+        # Consistency check after split
+        #self._validate_gaussian_consistency("[after densify_and_split]")
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent): #TODO: hier sollen sh-degrees mitkopiert werden beim klonen
+    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+        """
+        Clones gaussians with high gradients and small size.
+        Updates the SH optimizer state such that newly cloned gaussians keep their moments.
+        """
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         
+        num_clones = selected_pts_mask.sum().item()
+        print(f"[densify_and_clone] Cloning {num_clones} gaussians")
+        
         new_xyz = self._xyz[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
-        # Neue SH Speicherung
+        # Neue SH Speicherung - record the index of old gaussians before duplication
         new_sh_coeffs = self.sh_storage.duplicate_sh_of_gaussians(selected_pts_mask)
 
-        self.densification_postfix(new_xyz, new_opacities, new_scaling, new_rotation, new_sh_coeffs=new_sh_coeffs)
+        # duplicate last_promotion_iter for cloned gaussians
+        if hasattr(self, "last_promotion_iter") and self.last_promotion_iter is not None and self.last_promotion_iter.numel() > 0:
+            # selected_pts_mask can be boolean mask or indices
+            if selected_pts_mask.dtype == torch.bool:
+                clone_ids = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
+            else:
+                clone_ids = selected_pts_mask
+            new_last = self.last_promotion_iter[clone_ids]
+        else:
+            new_last = None
+            clone_ids = None
+
+        self.densification_postfix(new_xyz, new_opacities, new_scaling, new_rotation, new_sh_coeffs=new_sh_coeffs, new_last_promotion_iter=new_last)
+
+        # Extended SH optimizer state: replicate moments for newly cloned gaussians
+        if clone_ids is not None:
+            self._extend_sh_optimizer_state_for_densification(clone_ids)
+        
+        # Consistency check after clone
+        #self._validate_gaussian_consistency("[after densify_and_clone]")
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -886,7 +1229,14 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        
+        num_to_prune = prune_mask.sum().item()
+        print(f"[densify_and_prune] Pruning {num_to_prune} gaussians")
+        
         self.prune_points(prune_mask)
+        
+        # Consistency check after prune
+        #self._validate_gaussian_consistency("[after densify_and_prune]")
 
         torch.cuda.empty_cache()
 
@@ -1109,21 +1459,57 @@ class GaussianModel:
     
     # Old method
     
-    def increase_sh_degree_based_on_color_grads(self, ratio=0.05, maximum_degree = 3, only_for_degree = None):
+    def increase_sh_degree_based_on_color_grads(self, iteration: int, cool_down_iter: int, ratio: float = 0.05, maximum_degree: int = 3, only_for_degree = None):
+        """
+        Increase SH degree for the top `ratio` fraction of gaussians by accumulated color gradients.
+
+        Only gaussians satisfying (iteration - last_promotion_iter) > cool_down_iter are eligible. Gaussians with
+        last_promotion_iter == -1 (never promoted) are immediately eligible.
+        """
         valid_degree = (self.sh_degrees < maximum_degree)
         if only_for_degree is not None:
             valid_degree = valid_degree & (self.sh_degrees == only_for_degree)
-        quantile_value = torch.quantile(self.accum_color_grads_dc[valid_degree], 1-ratio)
-        valid = (self.accum_color_grads_dc > quantile_value).squeeze()
-        valid = valid & valid_degree
-        #valid = to_increase & (self.sh_degrees < self.max_sh_degree)
-        if valid.sum().item() == 0:
-            print("No Gaussians qualified for SH degree increase.")
+
+        # determine eligibility based on cool-down
+        if hasattr(self, "last_promotion_iter") and self.last_promotion_iter is not None and self.last_promotion_iter.numel() == self.sh_degrees.numel():
+            # last_promotion_iter == -1 means never promoted -> eligible
+            eligible = (self.last_promotion_iter < 0) | ((iteration - self.last_promotion_iter) > cool_down_iter)
+        else:
+            eligible = torch.ones_like(self.sh_degrees, dtype=torch.bool)
+
+        candidate_mask = valid_degree & eligible
+        if candidate_mask.sum().item() == 0:
+            print("No Gaussians qualified for SH degree increase (degree/cooldown filter).")
             return
+
+        try:
+            quantile_value = torch.quantile(self.accum_color_grads_dc[candidate_mask], 1.0 - ratio)
+        except Exception:
+            print("Unable to compute quantile for SH degree increase.")
+            return
+
+        # select by accumulated dc grads above quantile, respecting degree & cooldown
+        valid = (self.accum_color_grads_dc > quantile_value).squeeze() & valid_degree & eligible
+
+        if valid.sum().item() == 0:
+            print("No Gaussians qualified for SH degree increase after thresholding.")
+            return
+
         new_degrees = self.sh_degrees.clone()
         new_degrees[valid] += 1
         self._apply_new_sh_degrees(new_degrees)
-        updated_percentage = valid.sum().item() / self.sh_degrees.shape[0] * 100.0
+
+        # update last_promotion_iter for those promoted
+        try:
+            if not hasattr(self, "last_promotion_iter") or self.last_promotion_iter is None or self.last_promotion_iter.numel() != self.sh_degrees.numel():
+                device = self.sh_storage.sh_coeffs_flat.device if self.sh_storage is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+                self.last_promotion_iter = torch.full((self.sh_degrees.shape[0],), -1, device=device, dtype=torch.int64)
+            self.last_promotion_iter[valid] = int(iteration)
+        except Exception:
+            # best-effort: ignore update on error
+            pass
+
+        updated_percentage = valid.sum().item() / max(1, self.sh_degrees.shape[0]) * 100.0
         print(f"Increased SH degree for {valid.sum().item()} Gaussians ({updated_percentage:.2f}%) based on color gradients.")
     
     '''

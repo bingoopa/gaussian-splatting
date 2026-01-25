@@ -17,7 +17,8 @@ from lpipsPyTorch import LPIPS
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, get_expon_lr_func # Newly added from original repo
+#from utils.general_utils import safe_state
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -25,6 +26,28 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from PIL import Image
 import numpy as np
+
+# Newly added from original repo 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_FOUND = True
+except ImportError:
+    TENSORBOARD_FOUND = False
+
+try:
+    from fused_ssim import fused_ssim
+    FUSED_SSIM_AVAILABLE = True
+    print("Fused SSIM available")
+except:
+    FUSED_SSIM_AVAILABLE = False
+
+try:
+    from diff_gaussian_rasterization import SparseGaussianAdam
+    SPARSE_ADAM_AVAILABLE = True
+    print("Sparse Gaussian Adam available")
+except:
+    SPARSE_ADAM_AVAILABLE = False
+
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -54,6 +77,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
     print("psnr_ssim_iterations={}".format(psnr_ssim_iterations))
+
+    # Newly added from original repo
+    if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
+        sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
+    
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -137,7 +165,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
-    viewpoint_stack = None
+    # Newly added from original repo
+    use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
+    depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
+    viewpoint_stack = scene.getTrainCameras().copy()
+    viewpoint_indices = list(range(len(viewpoint_stack)))
+    ema_loss_for_log = 0.0
+    ema_Ll1depth_for_log = 0.0
+    if dataset.train_test_exp:
+        print("Use training exposure is true. Consider checking it in comparison with original repo.")
+
+    #viewpoint_stack = None 
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -167,10 +205,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Scannet: for _ in range(opt.optimizer_step_interval):
 
+        # Old version : pick random camera
         # Pick a random Camera
+        #if not viewpoint_stack:
+        #    viewpoint_stack = scene.getTrainCameras().copy()
+        #viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+
+        # Newly added from original repo: shuffle every epoch
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+            viewpoint_indices = list(range(len(viewpoint_stack)))
+        rand_idx = randint(0, len(viewpoint_indices) - 1)
+        viewpoint_cam = viewpoint_stack.pop(rand_idx)
+        vind = viewpoint_indices.pop(rand_idx)
 
         # Render
         if (iteration - 1) == debug_from:
@@ -180,13 +227,40 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        
+
+
+        # Apply alpha mask from original repo
+        if viewpoint_cam.alpha_mask is not None:
+            alpha_mask = viewpoint_cam.alpha_mask.cuda()
+            image *= alpha_mask
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
-        # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-        loss = Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
+        # Newly added from original repo:
+        if FUSED_SSIM_AVAILABLE:
+            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+        else:
+            ssim_value = ssim(image, gt_image)
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value) # Newly added from original repo
+        # loss = Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image)) # old version
         #loss /= opt.optimizer_step_interval     # Gradient accumulation
+
+        # Depth regularization newly added from original repo
+        Ll1depth_pure = 0.0
+        #if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+        #    invDepth = render_pkg["depth"]
+        #    mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+        #    depth_mask = viewpoint_cam.depth_mask.cuda()
+
+        #    Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+        #    Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
+        #    loss += Ll1depth
+        #    Ll1depth = Ll1depth.item()
+        #else:
+        Ll1depth = 0
+
         loss.backward()
 
 
@@ -196,8 +270,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            # newly added from original repo
+            ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                # progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"}) # old version
+                # Newly added from original repo:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
@@ -237,15 +316,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # New scheduling of SH degree increase based on color gradients
             if iteration >= first_phase_start and iteration < second_phase_start:
                 if (iteration - first_phase_start) % first_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio, maximum_degree=first_phase_max_degree)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=first_phase_ratio, maximum_degree=first_phase_max_degree, iteration = iteration, cool_down_iter=50)
                     gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             elif iteration >= second_phase_start and iteration < third_phase_start:
                 if (iteration - second_phase_start) % second_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio, maximum_degree=second_phase_max_degree)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=second_phase_ratio, maximum_degree=second_phase_max_degree, iteration = iteration, cool_down_iter=50)
                     gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             elif iteration >= third_phase_start and iteration <= third_phase_end:
                 if (iteration - third_phase_start) % third_phase_frequency == 0:
-                    gaussians.increase_sh_degree_based_on_color_grads(ratio=third_phase_ratio, maximum_degree=third_phase_max_degree)
+                    gaussians.increase_sh_degree_based_on_color_grads(ratio=third_phase_ratio, maximum_degree=third_phase_max_degree, iteration = iteration, cool_down_iter=50)
                     gaussians.get_sh_degree_distribution(iteration=iteration, schedule_name=schedule_name)
             
 
@@ -277,8 +356,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if need_color_grads and iteration % average_gradients_over == 0:
                 gaussians.color_gradients_postfix()
 
+            # Optimizer step # old version
+            #if iteration < opt.iterations:
+            #    gaussians.optimizer.step()
+            #    gaussians.optimizer.zero_grad(set_to_none = True)
+
+            # Newly added from original repo:
             # Optimizer step
             if iteration < opt.iterations:
+                #gaussians.exposure_optimizer.step()
+                #gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+                #if use_sparse_adam:
+                #    visible = radii > 0
+                #    gaussians.optimizer.step(visible, radii.shape[0])
+                #    gaussians.optimizer.zero_grad(set_to_none = True)
+                #else:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 

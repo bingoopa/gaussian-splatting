@@ -107,7 +107,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
             sh_packed = _prepare(storage.sh_coeffs_flat, dtype=storage.sh_coeffs_flat.dtype)
             sh_offsets = _prepare(storage.gauss_offsets, dtype=torch.int32)
-            sh_degrees = _prepare(storage.sh_degrees, dtype=torch.int16)
+            sh_degrees = _prepare(storage.sh_degrees, dtype=torch.int32)
+        
     else:
         colors_precomp = override_color
 

@@ -13,6 +13,16 @@
 #include "auxiliary.h"
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#include <stdio.h> // For printf debugging temporary
+
+static_assert(sizeof(glm::vec3) == 3 * sizeof(float),
+              "glm::vec3 is padded (likely 16 bytes)! This breaks SH layout."); //temporary check
+
+//struct SHRGB {
+//    float x, y, z;
+//};
+//static_assert(sizeof(SHRGB) == 3 * sizeof(float));
+
 namespace cg = cooperative_groups;
 
 // Forward method for converting the input spherical harmonics
@@ -45,7 +55,27 @@ __device__ glm::vec3 computeColorFromSH(
 
 	const int degree = sh_degrees ? min(sh_degrees[idx], max_degree) : max_degree;
 	int base = sh_offsets ? sh_offsets[idx] : idx * max_coeffs;
-	glm::vec3* sh = ((glm::vec3*)shs) + base;
+	glm::vec3* sh = ((glm::vec3*)shs) + base; // old version
+
+	//if (idx == 0) {  // WICHTIG: begrenzen!
+    //   printf("SH0: %f %f %f\n", sh[0].x, sh[0].y, sh[0].z);
+	//	printf("SH1: %f %f %f\n", sh[1].x, sh[1].y, sh[1].z);
+	//	printf("SH6: %f %f %f\n", sh[6].x, sh[6].y, sh[6].z);
+	//	printf("SH7: %f %f %f\n", sh[7].x, sh[7].y, sh[7].z);
+    //}
+	//if (idx == 4) {  // WICHTIG: begrenzen!
+    //    printf("SH0: %f %f %f\n", sh[0].x, sh[0].y, sh[0].z);
+	//	printf("SH1: %f %f %f\n", sh[1].x, sh[1].y, sh[1].z);
+	//	printf("SH6: %f %f %f\n", sh[6].x, sh[6].y, sh[6].z);
+	//	printf("SH7: %f %f %f\n", sh[7].x, sh[7].y, sh[7].z);
+    //}
+	//const SHRGB* sh = reinterpret_cast<const SHRGB*>(shs) + base; //new version
+	//auto shvec = [&](int k) {
+	//	const SHRGB c = sh[k];
+	//	return glm::vec3(c.x, c.y, c.z);
+	//};
+
+
 	glm::vec3 result = SH_C0 * sh[0];
 
 	if (degree > 0)
@@ -65,7 +95,6 @@ __device__ glm::vec3 computeColorFromSH(
 				SH_C2[2] * (2.0f * zz - xx - yy) * sh[6] +
 				SH_C2[3] * xz * sh[7] +
 				SH_C2[4] * (xx - yy) * sh[8];
-
 			if (degree > 2)
 			{
 				result = result +
@@ -259,6 +288,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// If colors have been precomputed, use them, otherwise convert
 	// spherical harmonics coefficients to RGB color.
+
+	//if (idx == 0) { temporary
+    //	printf("colors_precomp is %s\n", 
+    //       colors_precomp == nullptr ? "NULL" : "NOT NULL");
+	//}
+
 	if (colors_precomp == nullptr)
 	{
 		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, sh_offsets, sh_degrees, clamped);
@@ -477,4 +512,8 @@ void FORWARD::preprocess(int P, int D, int M,
 		tiles_touched,
 		prefiltered
 		);
+		//cudaError_t err = cudaDeviceSynchronize();
+		//if (err != cudaSuccess) {
+		//	printf("CUDA error after preprocessCUDA: %s\n", cudaGetErrorString(err));
+		//} //temporary
 }

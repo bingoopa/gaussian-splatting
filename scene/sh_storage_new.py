@@ -316,7 +316,7 @@ class SHStorage(nn.Module):
                 - Wichtig: max_degree >= max(self.sh_degree)
             """
             if max_degree is None:
-                max_degree = int(self.max_sh_degree)
+                max_degree = int(self.max_degree)
 
             N = self.num_gauss
             max_coeffs = (max_degree + 1) ** 2
