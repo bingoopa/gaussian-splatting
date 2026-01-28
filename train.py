@@ -76,7 +76,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print(f"positions: init={opt.position_lr_init} final={opt.position_lr_final} delay_mult={opt.position_lr_delay_mult} max_steps={opt.position_lr_max_steps}")
     print(f"feature={opt.feature_lr} opacity={opt.opacity_lr} scaling={opt.scaling_lr} rotation={opt.rotation_lr}")
     print(f"densification: interval={opt.densification_interval} from={opt.densify_from_iter} until={opt.densify_until_iter} grad_threshold={opt.densify_grad_threshold}")
-    print("psnr_ssim_iterations={}".format(psnr_ssim_iterations))
+    #print("psnr_ssim_iterations={}".format(psnr_ssim_iterations))
 
     # Newly added from original repo
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -94,6 +94,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # New: initialize sh_degrees randomly if needed
     if need_color_grads or color_grad_stats:
         gaussians.set_random_sh_degrees()
+
+    # Temporary: print initializing infos to compare with original repo
+    print("\n[ INFO ] Starting training with the following configuration:")
+    print(f"Number of Gaussians: {gaussians.get_xyz.shape[0]}")
+    print(f"SH Degree: {gaussians.active_sh_degree}")
+    print(f"Using optimizer: {opt.optimizer_type}")
+    print(f"Using train_test_exposure: {dataset.train_test_exp}")
+    print(f"SH storage size: {gaussians.sh_storage.num_gaussians}")
+    print(f"SH storage size: {gaussians.sh_storage.num_gauss}")
+    print(f"SH storage size (total coefficients): {gaussians.sh_storage.sh_coeffs_flat.shape[0], gaussians.sh_storage.sh_coeffs_flat.shape[1]}")
+    print(f"average SH coeffs per gaussian: {gaussians.sh_storage.sh_coeffs_flat.shape[0] / gaussians.sh_storage.num_gaussians}")
 
     # New: introduce early stopping
     # ---- Early stopping state (define once, e.g. before training loop) ----
@@ -138,16 +149,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # schedule 4:
     global schedule_name 
     # schedule 5:
-    schedule_name = "adaptive_schedule_5"
-    first_phase_start = 2000 
+    schedule_name = "schedule2.3"
+    first_phase_start = 1000
     second_phase_start = 6000 
     third_phase_start = 12000
     third_phase_end = 25000
 
     average_gradients_over = 100 
 
-    first_phase_ratio = 0.03 
-    second_phase_ratio = 0.025 
+    first_phase_ratio = 0.02 
+    second_phase_ratio = 0.015 
     third_phase_ratio = 0.005 
 
     first_phase_frequency = 750 
@@ -202,6 +213,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Every 1000 its we increase the levels of SH up to a maximum degree
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
+            print("Total number of gaussians: ", gaussians._xyz.shape[0])
 
         # Scannet: for _ in range(opt.optimizer_step_interval):
 
@@ -227,7 +239,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-        
+
 
 
         # Apply alpha mask from original repo
@@ -262,6 +274,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1depth = 0
 
         loss.backward()
+
+        # Here we print the gradients of the first 5 gaussians for debugging, temporary
+        if iteration == 0 or iteration == -1:
+            continue
+            print("Positions of first 5 gaussians at iteration {}:".format(iteration))
+            print(gaussians.get_xyz[:5])
+            print("Positional Gradients of first 5 gaussians at iteration {}:".format(iteration))
+            print(gaussians.get_xyz.grad[:5])
+            print("SH coefficient Gradients of first 5 gaussians at iteration {}:".format(iteration))
+            print(gaussians.sh_storage.sh_coeffs_flat.grad[:5], "with shape", gaussians.sh_storage.sh_coeffs_flat.grad[:5].shape)
+        if iteration < -1:
+            continue
 
 
         iter_end.record()
@@ -347,6 +371,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
+
+            # Debugging densification: temporary
+            if iteration == 1:
+                gaussians.tmp_radii = radii
+                gaussians.densify_and_clone(gaussians.xyz_gradient_accum / gaussians.denom, opt.densify_grad_threshold, scene.cameras_extent, debug=True)
+                print("Position of old second gaussian: ", gaussians.get_xyz[1:2])
+                print("Position of new cloned gaussian: ", gaussians.get_xyz[-1:])
+                print("SH Coeffs of old second gaussian: ", gaussians.sh_storage.sh_coeffs_flat[1:2])
+                print("SH Coeffs of new cloned gaussian: ", gaussians.sh_storage.sh_coeffs_flat[-1:])
             
             # New: reset color_gradient accumulator
             #if (color_grad_stats or need_color_grads) and iteration % color_grad_interval == opt.densify_from_iter:
@@ -371,6 +404,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #    gaussians.optimizer.step(visible, radii.shape[0])
                 #    gaussians.optimizer.zero_grad(set_to_none = True)
                 #else:
+                # Scale SH gradients: features_rest get 1/20 of features_dc learning rate
+                gaussians.scale_sh_gradients_before_optimizer_step()
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
 

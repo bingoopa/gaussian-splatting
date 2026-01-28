@@ -302,41 +302,61 @@ class GaussianModel:
         else:
             print(f"✓ Gaussian consistency check OK {context}: {xyz_count} gaussians")
 
-    def _remap_sh_optimizer(self, mapping):
+    def _reinit_sh_optimizer_state(self):
+        """
+        Reinitialize the SH coefficient optimizer state after degree increase.
+        
+        Called when SH storage is reorganized (e.g., degree increase via _repack_all).
+        Since SHStorage._repack_all() reorganizes coefficients internally,
+        we cannot reliably map old optimizer moments to new positions.
+        Instead, we safely reinitialize with fresh zero moments, preserving the step count.
+        """
         if self.optimizer is None:
             return
+        
         for group in self.optimizer.param_groups:
             if group["name"] != "sh_coeffs":
                 continue
+            
             old_param = group["params"][0]
             new_param = self.sh_storage.sh_coeffs_flat
+            
+            # Ensure new parameter requires gradients
             new_param.requires_grad_(True)
+            
+            # Update parameter reference in optimizer group
             group["params"][0] = new_param
-            old_state = self.optimizer.state.pop(old_param, None)
-            if old_state is None:
-                self.optimizer.state[new_param] = {
-                    "step": torch.tensor(0.0, device=new_param.device),
-                    "exp_avg": torch.zeros_like(new_param),
-                    "exp_avg_sq": torch.zeros_like(new_param),
-                }
-                return
-            new_state = {}
-            new_state["step"] = old_state.get("step", torch.tensor(0.0, device=new_param.device))
-            for key in ("exp_avg", "exp_avg_sq"):
-                src = old_state.get(key, None)
-                if src is None:
-                    new_state[key] = torch.zeros_like(new_param)
-                    continue
-                new_tensor = torch.zeros_like(new_param)
-                if mapping is not None and mapping.numel() == src.shape[0]:
-                    new_tensor[mapping] = src
+            
+            # Get old optimizer state to preserve the step count
+            old_state = self.optimizer.state.get(old_param, None)
+            
+            # Remove old optimizer state
+            if old_param in self.optimizer.state:
+                del self.optimizer.state[old_param]
+            
+            # Initialize fresh optimizer state for new parameter
+            # Preserve step count from old state, reset moments
+            new_state = {
+                "exp_avg": torch.zeros_like(new_param),
+                "exp_avg_sq": torch.zeros_like(new_param),
+            }
+            
+            # Preserve step count if it existed
+            # Note: PyTorch Adam stores step as a singleton tensor (0-dimensional)
+            if old_state is not None and "step" in old_state:
+                old_step = old_state["step"]
+                # Ensure step is a tensor on the correct device
+                if isinstance(old_step, torch.Tensor):
+                    new_state["step"] = old_step.to(device=new_param.device)
                 else:
-                    length = min(src.shape[0], new_tensor.shape[0])
-                    if length > 0:
-                        new_tensor[:length] = src[:length]
-                new_state[key] = new_tensor
+                    # If it's an int or float, convert to a singleton tensor
+                    new_state["step"] = torch.tensor(old_step, device=new_param.device, dtype=torch.long)
+            else:
+                # Initialize step to 0 if not present (as a singleton tensor)
+                new_state["step"] = torch.tensor(0, device=new_param.device, dtype=torch.long)
+            
             self.optimizer.state[new_param] = new_state
-            return
+            break
 
     def _extend_sh_optimizer_state(self, clone_indices):
         """
@@ -450,9 +470,18 @@ class GaussianModel:
         if self.sh_storage is None:
             return
         new_degrees = new_degrees.to(device=self.sh_storage.sh_coeffs_flat.device, dtype=torch.int32)
-        mapping = self.sh_storage._repack_all(new_degrees)
+        self.sh_storage._repack_all(new_degrees)
         self._sync_sh_degrees_from_storage()
-        self._remap_sh_optimizer(mapping)
+        # Degree-Increase NICHT mit cat_tensors_to_optimizer, da es eine Neuorganisation ist
+        # (nicht nur Erweiterung wie bei Densification).
+        # Die alte Methode cat_tensors_to_optimizer prüft: add_rows < 0 → Error
+        # Aber bei Degree-Increase können sich die Anzahl der Reihen verringern!
+        # Beispiel: 5 Gaussians mit Degree 3 → [1,1,1,1,1] coeffs → 5 rows
+        #          dann Degree-Increase auf [1,1,3,3,3] → [1,1,16,16,16] coeffs → 50 rows
+        # Die alte Moments-Struktur kann NICHT einfach mit torch.cat kombiniert werden,
+        # da jeder Koeffizient eine neue Position hat.
+        # Lösung: Sicher die Step-Count des Optimizers, reinitialize alle Moments.
+        self._reinit_sh_optimizer_state()
 
     @property
     def get_scaling(self):
@@ -503,7 +532,7 @@ class GaussianModel:
             num_gaussians=fused_point_cloud.shape[0],
             device=fused_point_cloud.device,
             max_degree=self.max_sh_degree,
-            init_deg=3
+            init_deg=0
         )
         self.sh_storage.initialize_sh_from_color(fused_color)
         self._sync_sh_degrees_from_storage()
@@ -547,10 +576,54 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        
+
+        # Store feature_lr for gradient scaling (features_rest get 1/20 of DC learning rate)
+        self.feature_lr = training_args.feature_lr
+        self.feature_lr_rest_scale = 1.0 / 20.0
+
+        # --- Ensure optimizer state is initialized for all parameter groups (prevents KeyError: 'step') ---
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    p.grad = torch.zeros_like(p.data)
+        self.optimizer.step()
+        self.optimizer.zero_grad(set_to_none=True)
+
         # Consistency check after training setup
         print("[training_setup] Checking initial consistency...")
         #self._validate_gaussian_consistency("[after training_setup]")
+
+    def scale_sh_gradients_before_optimizer_step(self):
+        """
+        Scale the gradients of features_rest (all SH coefficients except DC) by 1/20.
+        This is equivalent to having two separate learning rates:
+        - features_dc: lr = feature_lr
+        - features_rest: lr = feature_lr / 20.0
+        
+        Must be called right before optimizer.step() to apply the different learning rates.
+        """
+        if self.sh_storage is None or self.sh_storage.sh_coeffs_flat.grad is None:
+            return
+        
+        grad = self.sh_storage.sh_coeffs_flat.grad
+        if grad is None:
+            return
+        
+        device = grad.device
+        counts = self.sh_storage.num_coeffs_per_gauss.to(device=device, dtype=torch.long)
+        total = int(counts.sum().item())
+        if total == 0:
+            return
+        
+        # Create mask: DC coefficients (first coeff per gaussian) get scale 1.0, rest get scale 1/20
+        gauss_ids = torch.repeat_interleave(torch.arange(counts.shape[0], device=device, dtype=torch.long), counts)
+        local_idx = torch.arange(total, device=device, dtype=torch.long) - torch.repeat_interleave(torch.cumsum(counts, dim=0) - counts, counts)
+        
+        dc_mask = local_idx == 0
+        rest_mask = ~dc_mask
+        
+        # Scale rest gradients by 1/20
+        grad[rest_mask] *= self.feature_lr_rest_scale
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -978,13 +1051,13 @@ class GaussianModel:
         Verifies consistency before and after pruning.
         """
         # Consistency check before prune
-        print(f"[prune_points] Before prune: checking consistency...")
+        #print(f"[prune_points] Before prune: checking consistency...")
         #self._validate_gaussian_consistency("[before prune_points]")
         
         valid_points_mask = ~mask
         num_to_prune = mask.sum().item()
         num_remaining = valid_points_mask.sum().item()
-        print(f"[prune_points] Pruning {num_to_prune} gaussians, keeping {num_remaining}")
+        #print(f"[prune_points] Pruning {num_to_prune} gaussians, keeping {num_remaining}")
         
         counts = self.sh_storage.num_coeffs_per_gauss.to(device=valid_points_mask.device)
         if counts.shape[0] != valid_points_mask.shape[0]:
@@ -1018,7 +1091,7 @@ class GaussianModel:
                 self.last_promotion_iter = torch.full((n,), -1, device=device, dtype=torch.int64)
         
         # Consistency check after prune
-        print(f"[prune_points] After prune: checking consistency...")
+        #print(f"[prune_points] After prune: checking consistency...")
         #self._validate_gaussian_consistency("[after prune_points]")
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -1127,7 +1200,7 @@ class GaussianModel:
                 self.last_promotion_iter = pad
 
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, debug=False):
         """
         Splits gaussians with high gradients and large size.
         Updates the SH optimizer state such that newly cloned gaussians keep their moments.
@@ -1139,6 +1212,11 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+
+        if debug:
+            # Choose second gaussian for debugging, temporary
+            selected_pts_mask = torch.zeros_like(selected_pts_mask)
+            selected_pts_mask[1] = True
 
         selected_indices = torch.nonzero(selected_pts_mask, as_tuple=False).squeeze(-1)
         if selected_indices.numel() == 0:
@@ -1176,7 +1254,7 @@ class GaussianModel:
         # Consistency check after split
         #self._validate_gaussian_consistency("[after densify_and_split]")
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, debug=False):
         """
         Clones gaussians with high gradients and small size.
         Updates the SH optimizer state such that newly cloned gaussians keep their moments.
@@ -1185,6 +1263,11 @@ class GaussianModel:
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+
+        if debug:
+            # Choose second gaussian for debugging, temporary
+            selected_pts_mask = torch.zeros_like(selected_pts_mask)
+            selected_pts_mask[1] = True
         
         num_clones = selected_pts_mask.sum().item()
         print(f"[densify_and_clone] Cloning {num_clones} gaussians")
