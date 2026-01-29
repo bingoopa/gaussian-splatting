@@ -404,10 +404,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #    gaussians.optimizer.step(visible, radii.shape[0])
                 #    gaussians.optimizer.zero_grad(set_to_none = True)
                 #else:
-                # Scale SH gradients: features_rest get 1/20 of features_dc learning rate
-                gaussians.scale_sh_gradients_before_optimizer_step()
-                gaussians.optimizer.step()
-                gaussians.optimizer.zero_grad(set_to_none = True)
+                # Use custom optimizer step with proper SH coefficient learning rate scaling
+                # This integrates the different LRs (DC vs rest) into Adam's bias correction
+                gaussians.optimizer_step_with_scaled_sh_lr()
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))

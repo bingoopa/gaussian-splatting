@@ -586,7 +586,7 @@ class GaussianModel:
             for p in group['params']:
                 if p.grad is None:
                     p.grad = torch.zeros_like(p.data)
-        self.optimizer.step()
+        #self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
 
         # Consistency check after training setup
@@ -624,6 +624,114 @@ class GaussianModel:
         
         # Scale rest gradients by 1/20
         grad[rest_mask] *= self.feature_lr_rest_scale
+
+    def optimizer_step_with_scaled_sh_lr(self):
+        """
+        Perform optimizer step with scaled learning rates for SH coefficients.
+        - DC coefficients (first coeff per gaussian): use full feature_lr
+        - Rest coefficients: use feature_lr / 20
+        
+        This properly integrates the different LRs into Adam's bias correction.
+        Handles both regular parameters and SH coefficients in sh_storage.
+        """
+        if self.optimizer is None:
+            return
+        
+        # First, handle custom step for SH coefficients with different DC/rest learning rates
+        for group in self.optimizer.param_groups:
+            if group["name"] != "sh_coeffs":
+                continue
+            
+            # Found the SH coeffs group - do custom step for it
+            param = group["params"][0]
+            if param.grad is None:
+                continue
+            
+            state = self.optimizer.state.get(param, None)
+            if state is None:
+                continue
+            
+            # Get step count
+            step = state.get("step", torch.tensor(0, device=param.device, dtype=torch.long))
+            if isinstance(step, torch.Tensor):
+                step_int = int(step.item())
+            else:
+                step_int = int(step)
+            step_int += 1
+            
+            # Create mask for DC vs rest coefficients
+            device = param.device
+            counts = self.sh_storage.num_coeffs_per_gauss.to(device=device, dtype=torch.long)
+            total = int(counts.sum().item())
+            
+            if total == 0:
+                continue
+            
+            gauss_ids = torch.repeat_interleave(
+                torch.arange(counts.shape[0], device=device, dtype=torch.long), counts
+            )
+            local_idx = torch.arange(total, device=device, dtype=torch.long) - torch.repeat_interleave(
+                torch.cumsum(counts, dim=0) - counts, counts
+            )
+            
+            dc_mask = local_idx == 0
+            rest_mask = ~dc_mask
+            
+            # Get moments and gradient
+            exp_avg = state["exp_avg"]
+            exp_avg_sq = state["exp_avg_sq"]
+            grad = param.grad
+            
+            beta1 = group["betas"][0]
+            beta2 = group["betas"][1]
+            eps = group["eps"]
+            
+            # Bias correction factors
+            bias_correction1 = 1 - beta1 ** step_int
+            bias_correction2 = 1 - beta2 ** step_int
+            
+            # Update moments (same for both DC and rest)
+            exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+            exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+            
+            # Compute updates with different learning rates
+            denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(eps)
+            step_size_dc = group["lr"] / bias_correction1
+            step_size_rest = (group["lr"] / 20.0) / bias_correction1
+            
+            # Apply update
+            param.data[dc_mask].add_(exp_avg[dc_mask] / denom[dc_mask], alpha=-step_size_dc)
+            param.data[rest_mask].add_(exp_avg[rest_mask] / denom[rest_mask], alpha=-step_size_rest)
+            
+            # Update step counter
+            state["step"] = torch.tensor(step_int, device=device, dtype=torch.long)
+            break
+        
+        # Now do a standard optimizer step for all other parameters
+        # We need to temporarily exclude the sh_coeffs parameter from the step
+        sh_param_to_exclude = None
+        sh_group_idx = None
+        for idx, group in enumerate(self.optimizer.param_groups):
+            if group["name"] == "sh_coeffs":
+                sh_param_to_exclude = group["params"][0]
+                sh_group_idx = idx
+                break
+        
+        # Temporarily remove sh_coeffs from optimizer groups
+        saved_group = None
+        if sh_group_idx is not None:
+            saved_group = self.optimizer.param_groups.pop(sh_group_idx)
+        
+        try:
+            # Do optimizer step for remaining parameters
+            self.optimizer.step()
+        finally:
+            # Restore sh_coeffs group
+            if saved_group is not None:
+                self.optimizer.param_groups.insert(sh_group_idx, saved_group)
+        
+        # Zero gradients
+        self.optimizer.zero_grad(set_to_none=True)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
