@@ -146,24 +146,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     second_phase_frequency = 250 # standard: 500
     third_phase_frequency = 1500 # standard: 1000
     '''
-    # schedule 4:
+
     global schedule_name 
-    # schedule 5:
-    schedule_name = "schedule2.3"
-    first_phase_start = 1000
-    second_phase_start = 6000 
-    third_phase_start = 12000
-    third_phase_end = 25000
+    # schedule 2:
+    schedule_name = "schedule2"
+    first_phase_start = 2000 # standard: 5000
+    second_phase_start = 6000 # standard: 10000
+    third_phase_start = 12000 # standard: 20000
+    third_phase_end = opt.iterations - 1 # standard: opt.iterations - 1
 
     average_gradients_over = 100 
 
-    first_phase_ratio = 0.02 
-    second_phase_ratio = 0.015 
-    third_phase_ratio = 0.005 
+    first_phase_ratio = 0.01 # standard: 0.005
+    second_phase_ratio = 0.015 # standard: 0.01
+    third_phase_ratio = 0.005 # standard: 0.002
 
-    first_phase_frequency = 750 
-    second_phase_frequency = 750 
-    third_phase_frequency = 1500 
+    first_phase_frequency = 250 # standard: 500
+    second_phase_frequency = 250 # standard: 500
+    third_phase_frequency = 1500 # standard: 1000
 
     first_phase_max_degree = 1
     second_phase_max_degree = 3
@@ -516,7 +516,7 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
                 print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
 
                 global schedule_name
-                with open(f"test_metrics_{schedule_name}.csv", "a") as f:
+                with open(f"test_metrics_{schedule_name}_new_opt.csv", "a") as f:
                     f.write(f"{iteration},{psnr_test},{ssim_test},{lpips_test}\n")
 
 
